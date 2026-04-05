@@ -3,15 +3,14 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 
 class AgentClient(Protocol):
     async def run_task(
-        self, prompt: str, system_prompt: str, max_iterations: int
-    ) -> tuple[str, int]:
-        """Run a task and return (output_text, tokens_used)."""
-        ...
+        self, prompt: str, system_prompt: str, max_iterations: int, workspace: Path
+    ) -> tuple[str, int]: ...
 
 
 @dataclass
@@ -29,11 +28,13 @@ async def run_eval_query(
     system_prompt: str,
     max_iterations: int = 30,
     timeout: int = 600,
+    workspace: Path | None = None,
 ) -> QueryResult:
     start = time.monotonic()
+    ws = workspace or Path(".")
     try:
         async with asyncio.timeout(timeout):
-            output, tokens = await client.run_task(prompt, system_prompt, max_iterations)
+            output, tokens = await client.run_task(prompt, system_prompt, max_iterations, ws)
             elapsed = time.monotonic() - start
             return QueryResult(output=output, tokens_used=tokens, wall_time_seconds=elapsed)
     except TimeoutError:
@@ -56,13 +57,11 @@ async def run_eval_query(
 
 
 class DryRunAgentClient:
-    """Simulates agent execution for testing without API calls."""
-
     def __init__(self, default_output: str = "# solution placeholder\nresult = 42") -> None:
         self._default_output = default_output
 
     async def run_task(
-        self, prompt: str, system_prompt: str, max_iterations: int
+        self, prompt: str, system_prompt: str, max_iterations: int, workspace: Path
     ) -> tuple[str, int]:
         await asyncio.sleep(0.01)
         return self._default_output, 150

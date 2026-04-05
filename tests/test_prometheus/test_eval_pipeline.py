@@ -72,7 +72,7 @@ class TestQueryRunner:
     @pytest.mark.asyncio
     async def test_timeout(self):
         class SlowClient:
-            async def run_task(self, prompt, system_prompt, max_iterations):
+            async def run_task(self, prompt, system_prompt, max_iterations, workspace):
                 await asyncio.sleep(10)
                 return "late", 0
 
@@ -83,7 +83,7 @@ class TestQueryRunner:
     @pytest.mark.asyncio
     async def test_exception_handling(self):
         class ErrorClient:
-            async def run_task(self, prompt, system_prompt, max_iterations):
+            async def run_task(self, prompt, system_prompt, max_iterations, workspace):
                 raise ValueError("API error")
 
         result = await run_eval_query(ErrorClient(), "p", "s")
@@ -112,7 +112,7 @@ class TestEvalRunner:
         class CaptureClient:
             last_prompt: str = ""
 
-            async def run_task(self, prompt, system_prompt, max_iterations):
+            async def run_task(self, prompt, system_prompt, max_iterations, workspace):
                 CaptureClient.last_prompt = prompt
                 return "ok", 100
 

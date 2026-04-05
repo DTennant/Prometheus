@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import logging
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -18,10 +18,11 @@ class AnthropicAgentClient:
         self._model = model
 
     async def run_task(
-        self, prompt: str, system_prompt: str, max_iterations: int
+        self, prompt: str, system_prompt: str, max_iterations: int, workspace: Path
     ) -> tuple[str, int]:
         total_tokens = 0
-        messages: list[dict[str, str]] = [{"role": "user", "content": prompt}]
+        augmented_prompt = f"Working directory: {workspace}\n\n{prompt}"
+        messages: list[dict[str, str]] = [{"role": "user", "content": augmented_prompt}]
 
         for _ in range(max_iterations):
             response = await self._client.messages.create(
@@ -59,12 +60,13 @@ class OpenAIAgentClient:
         self._model = model
 
     async def run_task(
-        self, prompt: str, system_prompt: str, max_iterations: int
+        self, prompt: str, system_prompt: str, max_iterations: int, workspace: Path
     ) -> tuple[str, int]:
         total_tokens = 0
+        augmented_prompt = f"Working directory: {workspace}\n\n{prompt}"
         messages: list[dict[str, str]] = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": augmented_prompt},
         ]
 
         for _ in range(max_iterations):

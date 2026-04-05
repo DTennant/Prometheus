@@ -45,6 +45,7 @@ class EvalRunner:
                         system_prompt=config.system_prompt,
                         max_iterations=config.parameters.max_iterations,
                         timeout=config.parameters.timeout_per_task,
+                        workspace=workspace,
                     )
 
                     if query_result.error:
