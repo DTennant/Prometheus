@@ -33,6 +33,9 @@ def run(
     seed_config: Optional[str] = typer.Option(
         None, "--seed-config", help="Path to seed config JSON"
     ),
+    task_limit: Optional[int] = typer.Option(
+        None, "--task-limit", help="Max tasks to load from suite"
+    ),
 ) -> None:
     """Run the self-bootstrapping evolution loop."""
     from prometheus.config.experiment_config import ExperimentConfig, ModelConfig
@@ -76,7 +79,7 @@ def run(
     run_dir = Path(output_dir) / experiment_config.run_id
     logger = ExperimentLogger(run_dir, config=experiment_config.model_dump())
 
-    tasks = get_task_suite(task_suite)
+    tasks = get_task_suite(task_suite, limit=task_limit)
 
     if dry_run:
         agent_client = DryRunAgentClient()
@@ -225,6 +228,28 @@ def show(
     best_config_path = Path(run_dir) / "best_config.json"
     if best_config_path.exists():
         typer.echo(f"\nBest config: {best_config_path}")
+
+
+@app.command()
+def benchmarks() -> None:
+    """List available benchmark suites and their installation status."""
+    from prometheus.eval.benchmarks import list_benchmarks
+
+    typer.echo("Available benchmark suites:\n")
+    for bench in list_benchmarks():
+        status = "INSTALLED" if bench["available"] else "NOT INSTALLED"
+        docker = " [Docker required]" if bench["requires_docker"] else ""
+        typer.echo(f"  {bench['name']:<20} {status:<15}{docker}")
+        typer.echo(f"    {bench['description']}")
+        if not bench["available"]:
+            typer.echo(f"    Install: {bench['install_hint']}")
+        typer.echo()
+
+    typer.echo("Built-in suites (always available):")
+    for name in ["default", "code_generation", "file_manipulation", "debugging", "reasoning"]:
+        typer.echo(f"  {name}")
+
+    typer.echo("\nUse: pyre run --task-suite <name> [--limit N]")
 
 
 def _build_agent_client(api_format: str, api_key: str, base_url: str | None, model: str):

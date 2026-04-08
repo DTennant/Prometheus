@@ -1,13 +1,13 @@
 ---
 active: true
-iteration: 2
+iteration: 1
 max_iterations: 500
 completion_promise: "DONE"
 initial_completion_promise: "DONE"
-started_at: "2026-04-08T12:07:24.086Z"
-session_id: "ses_293028b45ffe8XCq67EPRCMQZo"
+started_at: "2026-04-08T12:08:46.911Z"
+session_id: "ses_2930147e9ffeBMp8p6hl1kUm6q"
 ultrawork: true
 strategy: "continue"
-message_count_at_start: 156
+message_count_at_start: 163
 ---
-we should have better tasks for the agent to bootstrap itself, like terminal bench etc. or at least some existing benchmarks dockerized
+use sleep to wait for subagents.

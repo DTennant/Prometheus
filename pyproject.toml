@@ -31,6 +31,14 @@ dev = [
     "ruff>=0.5.0",
     "mypy>=1.10.0",
 ]
+benchmarks = [
+    "evalplus>=0.3.0",
+    "terminal-bench>=0.1.0",
+    "datasets>=2.0.0",
+]
+humaneval = ["evalplus>=0.3.0"]
+swebench = ["datasets>=2.0.0"]
+terminalbench = ["terminal-bench>=0.1.0"]
 
 [project.scripts]
 pyre = "prometheus.cli:app"
