@@ -19,7 +19,7 @@ class HumanEvalPlusAdapter(BenchmarkAdapter):
 
     def is_available(self) -> bool:
         try:
-            from evalplus.data import get_human_eval_plus
+            from evalplus.data import get_human_eval_plus  # type: ignore[import-not-found]  # noqa: F401
 
             return True
         except ImportError:
@@ -53,7 +53,6 @@ class _HumanEvalPlusTask(Task):
 
         test_imports = f"from solution import {entry_point}\n\n"
         base_tests = self._problem.get("test", "")
-        plus_tests = self._problem.get("plus_input", "")
 
         test_code = test_imports
         if base_tests:
@@ -85,7 +84,7 @@ class _HumanEvalPlusTask(Task):
         code = agent_output.strip()
         if code.startswith("```"):
             lines = code.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
+            lines = [line for line in lines if not line.strip().startswith("```")]
             code = "\n".join(lines)
 
         solution_path.write_text(code, encoding="utf-8")

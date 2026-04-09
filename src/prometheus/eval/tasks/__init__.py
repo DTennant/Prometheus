@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Callable
 
+from prometheus.eval.task import Task
 from prometheus.eval.tasks.code_generation import get_code_generation_tasks
 from prometheus.eval.tasks.file_manipulation import get_file_manipulation_tasks
 from prometheus.eval.tasks.debugging import get_debugging_tasks
@@ -11,7 +12,7 @@ from prometheus.eval.tasks.reasoning import get_reasoning_tasks
 log = logging.getLogger(__name__)
 
 
-def get_all_tasks():
+def get_all_tasks() -> list[Task]:
     return (
         get_code_generation_tasks()
         + get_file_manipulation_tasks()
@@ -20,8 +21,8 @@ def get_all_tasks():
     )
 
 
-def get_task_suite(name: str = "default", limit: int | None = None):
-    builtin_suites: dict[str, Any] = {
+def get_task_suite(name: str = "default", limit: int | None = None) -> list[Task]:
+    builtin_suites: dict[str, Callable[[], list[Task]]] = {
         "default": get_all_tasks,
         "code_generation": get_code_generation_tasks,
         "file_manipulation": get_file_manipulation_tasks,

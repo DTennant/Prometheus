@@ -236,7 +236,7 @@ def _run_code_test(instance: TaskInstance, workspace: Path, agent_output: str) -
     code = agent_output.strip()
     if code.startswith("```"):
         lines = code.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
+        lines = [line for line in lines if not line.strip().startswith("```")]
         code = "\n".join(lines)
 
     solution_path.write_text(code, encoding="utf-8")

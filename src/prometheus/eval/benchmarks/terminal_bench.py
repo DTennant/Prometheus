@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 from prometheus.eval.benchmarks.base import BenchmarkAdapter
 from prometheus.eval.task import Task, TaskInstance, TaskResult
@@ -30,7 +29,7 @@ class TerminalBenchAdapter(BenchmarkAdapter):
 
     def is_available(self) -> bool:
         try:
-            from terminal_bench.dataset.dataset import Dataset
+            from terminal_bench.dataset.dataset import Dataset  # type: ignore[import-not-found]  # noqa: F401
 
             return True
         except ImportError:

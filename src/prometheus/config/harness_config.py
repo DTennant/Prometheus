@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from string import Template
 from uuid import uuid4
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -67,7 +67,7 @@ class HarnessConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def migrate_workflow_prompts(cls, data: dict) -> dict:
+    def migrate_workflow_prompts(cls, data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(data, dict):
             return data
         if "workflow_prompts" in data and "workflow" not in data:

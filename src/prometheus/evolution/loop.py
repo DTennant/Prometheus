@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from prometheus.config.harness_config import HarnessConfig
 from prometheus.config.experiment_config import ExperimentConfig
@@ -55,7 +54,7 @@ class EvolutionLoop:
                 )
                 reports.append(report)
 
-            self._history.add_generation(gen, beam, reports)
+            self._history.add_generation(gen, beam, reports, self._config.token_budget)
             paired = list(zip(beam, reports))
             paired.sort(key=lambda p: p[1].scores.get("composite", p[1].accuracy), reverse=True)
             best_config, best_report = paired[0]

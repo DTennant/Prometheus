@@ -28,7 +28,7 @@ class SWEBenchAdapter(BenchmarkAdapter):
 
     def is_available(self) -> bool:
         try:
-            import datasets
+            import datasets  # type: ignore[import-untyped]  # noqa: F401
 
             return True
         except ImportError:
@@ -169,4 +169,4 @@ fi
         except (json.JSONDecodeError, TypeError):
             pass
 
-        return f"python -m pytest -x --timeout=60 2>&1"
+        return "python -m pytest -x --timeout=60 2>&1"

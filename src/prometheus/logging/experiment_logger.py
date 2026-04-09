@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +88,8 @@ class ExperimentLogger:
         return path
 
     def load_checkpoint(self, path: Path) -> dict[str, Any]:
-        return json.loads(path.read_text(encoding="utf-8"))
+        result: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        return result
 
     def load_events(self) -> list[dict[str, Any]]:
         if not self._events_path.exists():
