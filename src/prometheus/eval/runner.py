@@ -121,7 +121,13 @@ class EvalRunner:
     ) -> tuple[str, int, float, str | None]:
         phases = [p for p in config.workflow.phases if p.enabled]
         if not phases:
-            phases = [WorkflowPhase(name="execution", prompt_template="$task")]
+            phases = [
+                WorkflowPhase(
+                    name="execution",
+                    prompt_template="$task",
+                    max_iterations=config.parameters.max_iterations,
+                )
+            ]
 
         scratchpad = ""
         previous_output = ""
@@ -154,9 +160,7 @@ class EvalRunner:
 
             previous_output = query_result.output
 
-            if config.workflow.scratchpad_enabled and phase.pass_output_as == "scratchpad":
-                scratchpad += f"\n## {phase.name}\n{query_result.output}"
-            elif phase.pass_output_as == "context":
+            if phase.pass_output_as == "scratchpad" and config.workflow.scratchpad_enabled:
                 scratchpad += f"\n## {phase.name}\n{query_result.output}"
 
         return previous_output, total_tokens, total_time, last_error
