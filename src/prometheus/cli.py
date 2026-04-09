@@ -185,6 +185,13 @@ def _resolve_stage_seed(stage: int, output_dir: str) -> "AgentPackage":
         return create_seed_package()
 
     if stage == 2:
+        example_dir = Path(__file__).resolve().parent.parent.parent / "examples" / "evolved_agent"
+        if example_dir.is_dir():
+            return AgentPackage.from_directory(
+                example_dir,
+                package_id="enhanced_seed",
+                generation=0,
+            )
         pkg = create_seed_package()
         pkg.package_id = "enhanced_seed"
         return pkg

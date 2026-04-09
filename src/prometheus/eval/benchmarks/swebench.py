@@ -117,11 +117,20 @@ class _SWEBenchTask(Task):
         patch_path = workspace / "agent_patch.diff"
         patch_path.write_text(agent_output, encoding="utf-8")
 
+        test_patch = instance.metadata.get("test_patch", "")
+        if test_patch:
+            test_patch_path = workspace / "test_patch.diff"
+            test_patch_path.write_text(test_patch, encoding="utf-8")
+
         fail_to_pass = instance.metadata.get("fail_to_pass", "")
         image_tag = _docker_image_tag(instance.instance_id)
         test_cmd = _build_test_command(fail_to_pass)
 
-        docker_script = f"cd /testbed && git apply /workspace/agent_patch.diff && {test_cmd}"
+        apply_agent = "git apply --verbose /workspace/agent_patch.diff"
+        apply_test = ""
+        if test_patch:
+            apply_test = " && git apply --verbose /workspace/test_patch.diff"
+        docker_script = f"cd /testbed && {apply_agent}{apply_test} && {test_cmd}"
 
         cmd = [
             "docker",

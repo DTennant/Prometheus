@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
-
-import yaml  # type: ignore[import-untyped]
 
 from prometheus.eval.benchmarks.base import BenchmarkAdapter
 from prometheus.eval.task import Task, TaskInstance, TaskResult
@@ -31,15 +30,19 @@ class TerminalBenchAdapter(BenchmarkAdapter):
         try:
             from terminal_bench.dataset.dataset import Dataset  # type: ignore[import-not-found]  # noqa: F401
 
-            return True
+            return shutil.which("docker") is not None
         except ImportError:
             return False
 
     def get_tasks(self, limit: int | None = None) -> list[Task]:
         self.check_or_raise()
+        import yaml  # type: ignore[import-untyped]
         from terminal_bench.dataset.dataset import Dataset
 
-        ds = Dataset(name=self._dataset_name, version=self._dataset_version)
+        ds = Dataset(
+            name=self._dataset_name,
+            version=self._dataset_version,
+        )
         task_paths = list(ds.tasks)
         tasks: list[Task] = []
 
@@ -49,7 +52,8 @@ class TerminalBenchAdapter(BenchmarkAdapter):
                 continue
 
             try:
-                task_data = yaml.safe_load(task_yaml.read_text(encoding="utf-8"))
+                raw = task_yaml.read_text(encoding="utf-8")
+                task_data = yaml.safe_load(raw)
             except Exception:
                 continue
 
@@ -109,30 +113,89 @@ class _TerminalBenchTask(Task):
             )
         ]
 
-    def score(self, instance: TaskInstance, workspace: Path, agent_output: str) -> TaskResult:
-        run_tests = workspace / "run-tests.sh"
-        if run_tests.exists():
-            try:
-                result = subprocess.run(
-                    ["bash", str(run_tests)],
+    def score(
+        self,
+        instance: TaskInstance,
+        workspace: Path,
+        agent_output: str,
+    ) -> TaskResult:
+        dockerfile = workspace / "Dockerfile"
+        if not dockerfile.exists():
+            return TaskResult(
+                instance_id=instance.instance_id,
+                passed=False,
+                score=0.0,
+                tokens_used=0,
+                wall_time_seconds=0.0,
+                raw_output=agent_output,
+                error="No Dockerfile in workspace",
+            )
+
+        image_tag = f"tb-eval-{instance.instance_id}".lower()
+        error: str | None = None
+        passed = False
+
+        try:
+            subprocess.run(
+                ["docker", "build", "-t", image_tag, "."],
+                cwd=str(workspace),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=True,
+            )
+
+            compose = workspace / "docker-compose.yaml"
+            if compose.exists():
+                subprocess.run(
+                    ["docker", "compose", "up", "-d"],
                     cwd=str(workspace),
                     capture_output=True,
+                    timeout=60,
+                    check=True,
+                )
+
+            run_tests = workspace / "run-tests.sh"
+            if run_tests.exists():
+                result = subprocess.run(
+                    [
+                        "docker",
+                        "run",
+                        "--rm",
+                        "-v",
+                        f"{workspace}:/workspace",
+                        image_tag,
+                        "bash",
+                        "/workspace/run-tests.sh",
+                    ],
+                    capture_output=True,
                     text=True,
-                    timeout=120,
+                    timeout=300,
                 )
                 passed = result.returncode == 0
-                error = (
-                    (result.stderr.strip() or result.stdout.strip())[:500] if not passed else None
-                )
-            except subprocess.TimeoutExpired:
-                passed = False
-                error = "Test timed out (120s)"
-            except Exception as exc:
-                passed = False
-                error = str(exc)
-        else:
-            passed = False
-            error = "No run-tests.sh in workspace"
+                if not passed:
+                    out = result.stderr or result.stdout
+                    error = out.strip()[:500]
+            else:
+                error = "No run-tests.sh in workspace"
+        except subprocess.TimeoutExpired:
+            error = "Docker execution timed out"
+        except subprocess.CalledProcessError as exc:
+            error = f"Docker build/compose failed: {exc}"
+        except Exception as exc:
+            error = str(exc)
+        finally:
+            subprocess.run(
+                ["docker", "compose", "down", "--remove-orphans"],
+                cwd=str(workspace),
+                capture_output=True,
+                timeout=30,
+            ) if (workspace / "docker-compose.yaml").exists() else None
+            subprocess.run(
+                ["docker", "rmi", "-f", image_tag],
+                capture_output=True,
+                timeout=30,
+            )
 
         return TaskResult(
             instance_id=instance.instance_id,
