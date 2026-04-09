@@ -150,6 +150,29 @@ The LLM mutator reads all source files, receives eval results (which tasks passe
 
 Each candidate is built into a Docker image, run against all eval tasks in isolated containers, and scored on the host.
 
+### Staged Evolution
+
+Code evolution supports multi-stage campaigns via `--stage`:
+
+| Stage | Seed | Tasks | Goal |
+|-------|------|-------|------|
+| 1 (default) | Minimal (7 tools, ~800 lines) | 13 built-in tasks | Evolve tool use, error handling, basic workflow |
+| 2 | Enhanced seed | 13 built-in tasks | Evolve planning, context management |
+| 3 | Winner of stage 2 | SWE-bench subset | Evolve toward real-world SWE capability |
+
+Each stage uses the previous stage's best agent as its seed:
+
+```bash
+# Stage 1: basic tool mastery
+pyre run --mode code --stage 1 --generations 8 --beam-size 3
+
+# Stage 2: planning and context (uses stage 1 winner)
+pyre run --mode code --stage 2 --generations 10 --beam-size 3
+
+# Stage 3: real benchmarks (uses stage 2 winner)
+pyre run --mode code --stage 3 --task-suite swebench --task-limit 30 --generations 10
+```
+
 ### Eval Suite
 
 13 tasks across 4 categories, scored by `accuracy × (budget / tokens_used)`:
@@ -162,6 +185,65 @@ Each candidate is built into a Docker image, run against all eval tasks in isola
 | Reasoning | 2 | topological sort, state machine |
 
 Each task runs the agent in a sandboxed workspace and validates results via subprocess test execution.
+
+### External Benchmarks
+
+Prometheus integrates with real benchmarks for validation:
+
+| Benchmark | Docker | Install | Tasks |
+|-----------|--------|---------|-------|
+| SWE-bench Verified | Yes (per-instance containers) | `pip install datasets` + Docker | 500 real GitHub issues |
+| HumanEval+ | No (subprocess) | `pip install evalplus` | 164 coding problems with augmented tests |
+| TerminalBench | Yes (Docker Compose) | `pip install terminal-bench pyyaml` | 89 terminal tasks |
+
+```bash
+# List available benchmarks
+pyre benchmarks
+
+# Use SWE-bench as eval suite (first 30 instances)
+pyre run --mode code --task-suite swebench --task-limit 30 --generations 5
+
+# Use HumanEval+ (first 50 problems)
+pyre run --task-suite humaneval_plus --task-limit 50 --generations 5
+```
+
+SWE-bench uses official pre-built Docker images from `docker.io/swebench/`. First run will pull images automatically.
+
+---
+
+## Example Evolved Agent
+
+The `examples/evolved_agent/` directory contains a hand-crafted agent representing what a Stage 2 code evolution output might look like (~1000 lines, 8 tools):
+
+```
+examples/evolved_agent/
+├── pyproject.toml          # pip-installable
+├── Dockerfile              # Docker-buildable
+├── lineage.json            # Illustrative 3-generation evolution tree
+└── src/agent/
+    ├── agent.py            # Three-phase loop: plan → execute → verify
+    ├── tools.py            # 8 tools (read, write, edit, search, exec, test, git_diff, list)
+    ├── planner.py           # Task decomposition with step tracking
+    └── context.py          # Token-aware context management
+```
+
+Try it:
+
+```bash
+cd examples/evolved_agent
+pip install -e .
+
+# Or via Docker
+docker build -t evolved-agent .
+docker run --rm -v /tmp/ws:/workspace \
+    -e OPENAI_API_KEY=$KEY \
+    evolved-agent \
+    --prompt "Fix the bug in main.py" \
+    --workspace /workspace \
+    --model gpt-4o
+```
+
+This agent was not produced by running the evolution loop — see its `README.md` and `lineage.json` for details.
 
 ---
 
@@ -180,6 +262,7 @@ pyre benchmarks   List available benchmark suites
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--mode` | `config` | Evolution mode: `config` or `code` |
+| `--stage` | `1` | Code evolution stage: `1`=minimal, `2`=enhanced, `3`=swebench |
 | `-m, --model` | `claude-sonnet-4-20250514` | Model name |
 | `-g, --generations` | `20` | Number of evolution generations |
 | `-k, --beam-size` | `5` | Top-K candidates kept per generation |
