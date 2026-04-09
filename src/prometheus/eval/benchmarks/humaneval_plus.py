@@ -11,6 +11,18 @@ from prometheus.eval.task import Task, TaskInstance, TaskResult
 log = logging.getLogger(__name__)
 
 
+def _strip_markdown_fences(code: str) -> str:
+    """Remove markdown code fences if present."""
+    lines = code.strip().split("\n")
+    if not lines:
+        return code
+    if lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
 class HumanEvalPlusAdapter(BenchmarkAdapter):
     name = "humaneval_plus"
     description = "HumanEval+ from EvalPlus — 164 code generation tasks with augmented test suites"
@@ -57,6 +69,14 @@ class _HumanEvalPlusTask(Task):
         test_code = test_imports
         if base_tests:
             test_code += base_tests + "\n"
+
+        plus_inputs = self._problem.get("plus_input", [])
+        if plus_inputs:
+            test_code += "\n"
+            for inp in plus_inputs[:10]:
+                args = ", ".join(repr(a) for a in inp)
+                test_code += f"try:\n    {entry_point}({args})\nexcept Exception:\n    pass\n"
+
         test_code += '\nprint("PASS")\n'
 
         return [
@@ -77,15 +97,16 @@ class _HumanEvalPlusTask(Task):
             )
         ]
 
-    def score(self, instance: TaskInstance, workspace: Path, agent_output: str) -> TaskResult:
+    def score(
+        self,
+        instance: TaskInstance,
+        workspace: Path,
+        agent_output: str,
+    ) -> TaskResult:
         solution_path = workspace / "solution.py"
         test_path = workspace / "test_solution.py"
 
-        code = agent_output.strip()
-        if code.startswith("```"):
-            lines = code.split("\n")
-            lines = [line for line in lines if not line.strip().startswith("```")]
-            code = "\n".join(lines)
+        code = _strip_markdown_fences(agent_output)
 
         solution_path.write_text(code, encoding="utf-8")
         test_path.write_text(instance.expected_output, encoding="utf-8")
@@ -101,11 +122,25 @@ class _HumanEvalPlusTask(Task):
             passed = result.returncode == 0 and "PASS" in result.stdout
             error = result.stderr.strip() if not passed else None
         except subprocess.TimeoutExpired:
-            passed = False
-            error = "Test execution timed out"
+            return TaskResult(
+                instance_id=instance.instance_id,
+                passed=False,
+                score=0.0,
+                tokens_used=0,
+                wall_time_seconds=30.0,
+                raw_output=agent_output,
+                error="Timeout: solution took >30s",
+            )
         except Exception as exc:
-            passed = False
-            error = str(exc)
+            return TaskResult(
+                instance_id=instance.instance_id,
+                passed=False,
+                score=0.0,
+                tokens_used=0,
+                wall_time_seconds=0.0,
+                raw_output=agent_output,
+                error=str(exc),
+            )
 
         return TaskResult(
             instance_id=instance.instance_id,

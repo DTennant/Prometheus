@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,17 @@ from prometheus.eval.benchmarks.base import BenchmarkAdapter
 from prometheus.eval.task import Task, TaskInstance, TaskResult
 
 log = logging.getLogger(__name__)
+
+
+def _docker_image_tag(instance_id: str) -> str:
+    """Convert instance_id to SWE-bench Docker image tag.
+
+    SWE-bench uses: swebench/sweb.eval.x86_64.{id}:latest
+    Instance IDs like 'astropy__astropy-12907' become
+    'astropy_1776_astropy-12907'.
+    """
+    docker_id = instance_id.replace("__", "_1776_")
+    return f"swebench/sweb.eval.x86_64.{docker_id}:latest".lower()
 
 
 class SWEBenchAdapter(BenchmarkAdapter):
@@ -21,7 +33,9 @@ class SWEBenchAdapter(BenchmarkAdapter):
     pip_package = "datasets"
 
     def __init__(
-        self, split: str = "test", dataset_name: str = "princeton-nlp/SWE-bench_Verified"
+        self,
+        split: str = "test",
+        dataset_name: str = "princeton-nlp/SWE-bench_Verified",
     ) -> None:
         self._split = split
         self._dataset_name = dataset_name
@@ -30,7 +44,7 @@ class SWEBenchAdapter(BenchmarkAdapter):
         try:
             import datasets  # type: ignore[import-untyped]  # noqa: F401
 
-            return True
+            return shutil.which("docker") is not None
         except ImportError:
             return False
 
@@ -63,15 +77,19 @@ class _SWEBenchTask(Task):
         hints = self._item.get("hints_text", "")
 
         prompt = (
-            f"Fix the following GitHub issue in the {repo} repository.\n\n"
+            f"Fix the following GitHub issue in the {repo}"
+            f" repository.\n\n"
             f"## Issue\n{problem_statement}\n\n"
         )
         if hints:
             prompt += f"## Hints\n{hints}\n\n"
         prompt += (
-            f"The repository is checked out at commit {base_commit}.\n"
-            f"Make the minimal changes needed to resolve the issue.\n"
-            f"Output a unified diff (patch) that can be applied with `git apply`."
+            f"The repository is checked out at commit"
+            f" {base_commit}.\n"
+            f"Make the minimal changes needed to resolve the"
+            f" issue.\n"
+            f"Output a unified diff (patch) that can be applied"
+            f" with `git apply`."
         )
 
         return [
@@ -90,59 +108,45 @@ class _SWEBenchTask(Task):
             )
         ]
 
-    def score(self, instance: TaskInstance, workspace: Path, agent_output: str) -> TaskResult:
+    def score(
+        self,
+        instance: TaskInstance,
+        workspace: Path,
+        agent_output: str,
+    ) -> TaskResult:
         patch_path = workspace / "agent_patch.diff"
         patch_path.write_text(agent_output, encoding="utf-8")
 
-        repo = instance.metadata.get("repo", "")
-        base_commit = instance.metadata.get("base_commit", "")
         fail_to_pass = instance.metadata.get("fail_to_pass", "")
+        image_tag = _docker_image_tag(instance.instance_id)
+        test_cmd = _build_test_command(fail_to_pass)
 
-        if not repo or not base_commit:
-            return TaskResult(
-                instance.instance_id,
-                False,
-                0.0,
-                0,
-                0.0,
-                agent_output,
-                "Missing repo/commit metadata",
-            )
+        docker_script = f"cd /testbed && git apply /workspace/agent_patch.diff && {test_cmd}"
 
-        test_script = f"""#!/bin/bash
-set -e
-
-if [ ! -d repo ]; then
-    git clone https://github.com/{repo}.git repo 2>/dev/null
-fi
-cd repo
-git checkout {base_commit} 2>/dev/null
-
-if git apply ../agent_patch.diff 2>/dev/null; then
-    echo "PATCH_APPLIED"
-else
-    echo "PATCH_FAILED"
-    exit 1
-fi
-
-{self._build_test_command(fail_to_pass)}
-"""
-        test_path = workspace / "run_test.sh"
-        test_path.write_text(test_script, encoding="utf-8")
+        cmd = [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{workspace}:/workspace",
+            image_tag,
+            "bash",
+            "-c",
+            docker_script,
+        ]
 
         try:
             result = subprocess.run(
-                ["bash", str(test_path)],
-                cwd=str(workspace),
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=300,
             )
-            passed = result.returncode == 0 and "PATCH_APPLIED" in result.stdout
+            passed = result.returncode == 0
             error = result.stderr.strip()[:500] if not passed else None
         except subprocess.TimeoutExpired:
             passed = False
-            error = "Evaluation timed out (5 min)"
+            error = "timeout"
         except Exception as exc:
             passed = False
             error = str(exc)
@@ -157,16 +161,17 @@ fi
             error=error,
         )
 
-    def _build_test_command(self, fail_to_pass: str) -> str:
-        if not fail_to_pass:
-            return 'echo "NO_TESTS_SPECIFIED"'
 
-        try:
-            tests = json.loads(fail_to_pass)
-            if isinstance(tests, list) and tests:
-                test_args = " ".join(tests)
-                return f"python -m pytest {test_args} -x --timeout=60 2>&1"
-        except (json.JSONDecodeError, TypeError):
-            pass
+def _build_test_command(fail_to_pass: str) -> str:
+    if not fail_to_pass:
+        return 'echo "NO_TESTS_SPECIFIED"'
 
-        return "python -m pytest -x --timeout=60 2>&1"
+    try:
+        tests = json.loads(fail_to_pass)
+        if isinstance(tests, list) and tests:
+            test_args = " ".join(tests)
+            return f"python -m pytest {test_args} -x --tb=short"
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    return "python -m pytest -x --tb=short"
