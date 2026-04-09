@@ -1,5 +1,5 @@
 import pytest
-from prometheus.config.harness_config import HarnessConfig
+from prometheus.config.harness_config import HarnessConfig, WorkflowConfig, WorkflowPhase
 from prometheus.eval.scorer import EvalReport
 from prometheus.eval.task import TaskResult
 from prometheus.evolution.selector import BeamSelector
@@ -44,6 +44,30 @@ class TestBeamSelector:
     def test_empty_candidates(self):
         selector = BeamSelector(beam_size=3)
         assert selector.select([]) == []
+
+    def test_dedup_preserves_workflow_diversity(self) -> None:
+        selector = BeamSelector(beam_size=3)
+        c1 = HarnessConfig(system_prompt="same prompt", config_id="c1")
+        c2 = HarnessConfig(
+            system_prompt="same prompt",
+            config_id="c2",
+            workflow=WorkflowConfig(
+                phases=[
+                    WorkflowPhase(
+                        name="planning",
+                        prompt_template="Plan: $task",
+                        max_iterations=5,
+                    ),
+                    WorkflowPhase(name="execution", prompt_template="$task"),
+                ],
+            ),
+        )
+        candidates = [
+            (c1, _make_report([True, True], "c1")),
+            (c2, _make_report([True, False], "c2")),
+        ]
+        selected = selector.select(candidates)
+        assert len(selected) == 2
 
 
 class TestEvolutionHistory:

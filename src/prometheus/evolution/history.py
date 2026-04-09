@@ -1,6 +1,6 @@
 from __future__ import annotations
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -26,9 +26,10 @@ class EvolutionHistory:
         gen: int,
         configs: list[HarnessConfig],
         reports: list[EvalReport],
+        budget_limit: int = 50_000,
     ) -> None:
         config_dicts = [c.model_dump() for c in configs]
-        scores = [r.accuracy for r in reports]
+        scores = [r.compute_composite(budget_limit) for r in reports]
         best_idx = max(range(len(scores)), key=lambda i: scores[i]) if scores else 0
         self._generations.append(
             GenerationRecord(
