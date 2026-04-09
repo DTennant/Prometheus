@@ -4,9 +4,16 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import typer
+
+if TYPE_CHECKING:
+    from prometheus.config.experiment_config import ExperimentConfig
+    from prometheus.eval.query_runner import AgentClient
+    from prometheus.eval.task import Task
+    from prometheus.evolution.mutator import LLMClient
+    from prometheus.logging.experiment_logger import ExperimentLogger
 
 app = typer.Typer(
     name="pyre",
@@ -36,23 +43,18 @@ def run(
     task_limit: Optional[int] = typer.Option(
         None, "--task-limit", help="Max tasks to load from suite"
     ),
+    mode: str = typer.Option("config", "--mode", help="Evolution mode: config or code"),
 ) -> None:
     """Run the self-bootstrapping evolution loop."""
     from prometheus.config.experiment_config import ExperimentConfig, ModelConfig
-    from prometheus.config.harness_config import HarnessConfig
-    from prometheus.eval.query_runner import DryRunAgentClient
-    from prometheus.eval.runner import EvalRunner
     from prometheus.eval.tasks import get_task_suite
-    from prometheus.evolution.loop import EvolutionLoop
-    from prometheus.evolution.mutator import DryRunLLMClient
-    from prometheus.evolution.seed import create_seed_harness
     from prometheus.logging.experiment_logger import ExperimentLogger
 
     resolved_key = (
         api_key or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
     )
 
-    from typing import cast, Literal
+    from typing import Literal, cast
 
     fmt = cast(
         Literal["anthropic", "openai"],
@@ -62,7 +64,7 @@ def run(
         name=model,
         api_format=fmt,
         base_url=base_url,
-        api_key_env="ANTHROPIC_API_KEY" if fmt == "anthropic" else "OPENAI_API_KEY",
+        api_key_env=("ANTHROPIC_API_KEY" if fmt == "anthropic" else "OPENAI_API_KEY"),
     )
 
     experiment_config = ExperimentConfig(
@@ -81,12 +83,69 @@ def run(
 
     tasks = get_task_suite(task_suite, limit=task_limit)
 
+    typer.echo(f"Starting evolution: {generations} generations, beam_size={beam_size}")
+    typer.echo(f"Model: {model}, Task suite: {task_suite} ({len(tasks)} tasks)")
+    typer.echo(f"Output: {run_dir}")
+
+    if mode == "code":
+        _run_code_evolution(
+            experiment_config,
+            tasks,
+            logger,
+            run_dir,
+            resolved_key,
+            api_format,
+            base_url,
+            model,
+            dry_run,
+            generations,
+        )
+    else:
+        _run_config_evolution(
+            experiment_config,
+            tasks,
+            logger,
+            run_dir,
+            resolved_key,
+            api_format,
+            base_url,
+            model,
+            dry_run,
+            seed_config,
+            resume,
+        )
+
+
+def _run_config_evolution(
+    experiment_config: "ExperimentConfig",
+    tasks: list["Task"],
+    logger: "ExperimentLogger",
+    run_dir: Path,
+    resolved_key: str,
+    api_format: str,
+    base_url: str | None,
+    model: str,
+    dry_run: bool,
+    seed_config: str | None,
+    resume: str | None,
+) -> None:
+    from prometheus.config.harness_config import HarnessConfig
+    from prometheus.eval.query_runner import DryRunAgentClient
+    from prometheus.eval.runner import EvalRunner
+    from prometheus.evolution.loop import EvolutionLoop
+    from prometheus.evolution.mutator import DryRunLLMClient
+    from prometheus.evolution.seed import create_seed_harness
+
+    agent_client: AgentClient
+    llm_client: LLMClient
     if dry_run:
         agent_client = DryRunAgentClient()
         llm_client = DryRunLLMClient()
+        typer.echo("DRY RUN MODE: using simulated responses\n")
     else:
         agent_client = _build_agent_client(api_format, resolved_key, base_url, model)
         llm_client = _build_llm_client(api_format, resolved_key, base_url, model)
+        typer.echo("")
 
     eval_runner = EvalRunner(tasks, agent_client, logger)
 
@@ -102,19 +161,74 @@ def run(
 
     loop = EvolutionLoop(experiment_config, eval_runner, llm_client, logger)
 
-    typer.echo(f"Starting evolution: {generations} generations, beam_size={beam_size}")
-    typer.echo(f"Model: {model}, Task suite: {task_suite} ({len(tasks)} tasks)")
-    typer.echo(f"Output: {run_dir}")
-    if dry_run:
-        typer.echo("DRY RUN MODE: using simulated responses")
-    typer.echo("")
-
     best = asyncio.run(loop.run(seed))
 
     best_path = run_dir / "best_config.json"
     best_path.write_text(best.model_dump_json(indent=2), encoding="utf-8")
     typer.echo(f"\nEvolution complete! Best config saved to: {best_path}")
     typer.echo(f"Best accuracy: {loop.history.get_best(1)[0][1]:.1%}")
+
+
+def _run_code_evolution(
+    experiment_config: "ExperimentConfig",
+    tasks: list["Task"],
+    logger: "ExperimentLogger",
+    run_dir: Path,
+    resolved_key: str,
+    api_format: str,
+    base_url: str | None,
+    model: str,
+    dry_run: bool,
+    generations: int,
+) -> None:
+    from prometheus.code_evolution.builder import (
+        DockerBuilder,
+        DryRunDockerBuilder,
+    )
+    from prometheus.code_evolution.loop import CodeEvolutionLoop
+    from prometheus.code_evolution.mutator import DryRunCodeMutator
+    from prometheus.code_evolution.runner import (
+        DockerRunner,
+        DryRunDockerRunner,
+    )
+    from prometheus.code_evolution.seed import create_seed_package
+
+    if dry_run:
+        builder: DockerBuilder | DryRunDockerBuilder = DryRunDockerBuilder()
+        runner: DockerRunner | DryRunDockerRunner = DryRunDockerRunner()
+        code_llm: LLMClient = DryRunCodeMutator()
+        typer.echo("DRY RUN MODE: using simulated responses\n")
+    else:
+        builder = DockerBuilder()
+        runner = DockerRunner(
+            model=model,
+            api_key=resolved_key,
+            base_url=base_url or "",
+        )
+        code_llm = _build_llm_client(api_format, resolved_key, base_url, model)
+        typer.echo("")
+
+    seed_pkg = create_seed_package()
+
+    code_loop = CodeEvolutionLoop(
+        experiment_config,
+        code_llm,
+        builder,
+        runner,
+        tasks,
+        logger,
+    )
+
+    best_pkg = asyncio.run(code_loop.run(seed_pkg))
+
+    best_dir = run_dir / "best_agent"
+    typer.echo(f"\nEvolution complete! Best agent saved to: {best_dir}")
+    history = code_loop.history.get_best(1)
+    if history:
+        typer.echo(f"Best score: {history[0][1]:.4f}")
+    typer.echo(
+        f"Files: {len(best_pkg.files)} ({sum(len(c) for c in best_pkg.files.values())} bytes)"
+    )
 
 
 @app.command("eval-only")
@@ -142,6 +256,7 @@ def eval_only(
     out_dir = Path(output_dir)
     logger = ExperimentLogger(out_dir)
 
+    client: AgentClient
     if dry_run:
         client = DryRunAgentClient()
     else:
@@ -252,7 +367,9 @@ def benchmarks() -> None:
     typer.echo("\nUse: pyre run --task-suite <name> [--limit N]")
 
 
-def _build_agent_client(api_format: str, api_key: str, base_url: str | None, model: str):
+def _build_agent_client(
+    api_format: str, api_key: str, base_url: str | None, model: str
+) -> AgentClient:
     if not api_key:
         raise typer.BadParameter("API key required for non-dry-run mode. Set --api-key or env var.")
     if api_format == "openai":
@@ -264,7 +381,7 @@ def _build_agent_client(api_format: str, api_key: str, base_url: str | None, mod
     return AnthropicAgentClient(api_key, model, base_url=base_url)
 
 
-def _build_llm_client(api_format: str, api_key: str, base_url: str | None, model: str):
+def _build_llm_client(api_format: str, api_key: str, base_url: str | None, model: str) -> LLMClient:
     if not api_key:
         raise typer.BadParameter("API key required for non-dry-run mode. Set --api-key or env var.")
     if api_format == "openai":

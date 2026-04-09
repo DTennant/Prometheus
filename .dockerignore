@@ -1,0 +1,15 @@
+.git
+__pycache__
+*.egg-info
+*.pyc
+.mypy_cache
+.pytest_cache
+.ruff_cache
+runs/
+eval_results/
+reference/
+tests/
+docs/
+assets/
+uv.lock
+*.md
