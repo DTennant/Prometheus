@@ -1,0 +1,45 @@
+{
+  "package_id": "evolved_example",
+  "generation": 3,
+  "parent_id": "gen2_winner",
+  "lineage": [
+    {
+      "generation": 0,
+      "package_id": "seed",
+      "score": 0.23,
+      "mutations": []
+    },
+    {
+      "generation": 1,
+      "package_id": "gen1_winner",
+      "parent_id": "seed",
+      "score": 0.54,
+      "mutations": [
+        "Added edit_file and search_files tools",
+        "Improved system prompt"
+      ]
+    },
+    {
+      "generation": 2,
+      "package_id": "gen2_winner",
+      "parent_id": "gen1_winner",
+      "score": 0.71,
+      "mutations": [
+        "Added planning phase",
+        "Added run_tests tool"
+      ]
+    },
+    {
+      "generation": 3,
+      "package_id": "evolved_example",
+      "parent_id": "gen2_winner",
+      "score": 0.85,
+      "mutations": [
+        "Added context management",
+        "Added git_diff tool",
+        "Added verification phase"
+      ]
+    }
+  ],
+  "note": "Illustrative lineage — not from actual evolution run"
+}

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Optional
 import typer
 
 if TYPE_CHECKING:
+    from prometheus.code_evolution.package import AgentPackage
     from prometheus.config.experiment_config import ExperimentConfig
     from prometheus.eval.query_runner import AgentClient
     from prometheus.eval.task import Task
@@ -44,6 +45,11 @@ def run(
         None, "--task-limit", help="Max tasks to load from suite"
     ),
     mode: str = typer.Option("config", "--mode", help="Evolution mode: config or code"),
+    stage: int = typer.Option(
+        1,
+        "--stage",
+        help="Code evolution stage: 1=minimal, 2=enhanced, 3=swebench",
+    ),
 ) -> None:
     """Run the self-bootstrapping evolution loop."""
     from prometheus.config.experiment_config import ExperimentConfig, ModelConfig
@@ -99,6 +105,8 @@ def run(
             model,
             dry_run,
             generations,
+            stage,
+            output_dir,
         )
     else:
         _run_config_evolution(
@@ -169,6 +177,47 @@ def _run_config_evolution(
     typer.echo(f"Best accuracy: {loop.history.get_best(1)[0][1]:.1%}")
 
 
+def _resolve_stage_seed(stage: int, output_dir: str) -> "AgentPackage":
+    from prometheus.code_evolution.package import AgentPackage
+    from prometheus.code_evolution.seed import create_seed_package
+
+    if stage <= 1:
+        return create_seed_package()
+
+    if stage == 2:
+        pkg = create_seed_package()
+        pkg.package_id = "enhanced_seed"
+        return pkg
+
+    best_agent_dir = _find_latest_best_agent(output_dir)
+    if best_agent_dir is None:
+        typer.echo(
+            "Error: --stage 3 requires a previous run with "
+            "best_agent/ output. Run stage 1 or 2 first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    return AgentPackage.from_directory(
+        best_agent_dir,
+        package_id="stage2_winner",
+        generation=0,
+    )
+
+
+def _find_latest_best_agent(output_dir: str) -> Path | None:
+    runs = Path(output_dir)
+    if not runs.is_dir():
+        return None
+    candidates: list[Path] = []
+    for run_dir in runs.iterdir():
+        best = run_dir / "best_agent"
+        if best.is_dir() and (best / "pyproject.toml").exists():
+            candidates.append(best)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
 def _run_code_evolution(
     experiment_config: "ExperimentConfig",
     tasks: list["Task"],
@@ -180,6 +229,8 @@ def _run_code_evolution(
     model: str,
     dry_run: bool,
     generations: int,
+    stage: int = 1,
+    output_dir: str = "runs",
 ) -> None:
     from prometheus.code_evolution.builder import (
         DockerBuilder,
@@ -191,13 +242,12 @@ def _run_code_evolution(
         DockerRunner,
         DryRunDockerRunner,
     )
-    from prometheus.code_evolution.seed import create_seed_package
 
     if dry_run:
         builder: DockerBuilder | DryRunDockerBuilder = DryRunDockerBuilder()
         runner: DockerRunner | DryRunDockerRunner = DryRunDockerRunner()
         code_llm: LLMClient = DryRunCodeMutator()
-        typer.echo("DRY RUN MODE: using simulated responses\n")
+        typer.echo("DRY RUN MODE: using simulated responses")
     else:
         builder = DockerBuilder()
         runner = DockerRunner(
@@ -206,9 +256,9 @@ def _run_code_evolution(
             base_url=base_url or "",
         )
         code_llm = _build_llm_client(api_format, resolved_key, base_url, model)
-        typer.echo("")
 
-    seed_pkg = create_seed_package()
+    seed_pkg = _resolve_stage_seed(stage, output_dir)
+    typer.echo(f"Stage {stage}: seed={seed_pkg.package_id}\n")
 
     code_loop = CodeEvolutionLoop(
         experiment_config,
