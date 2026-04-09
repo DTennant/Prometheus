@@ -32,7 +32,7 @@ eval/
 - `runner.py` silently injects a default workflow phase when none configured — can confuse debugging
 - `query_runner.py` `DryRunAgentClient` pass rate depends on `hash(prompt) % 100` — deterministic but opaque
 - `tasks/code_generation.py` strips markdown fences from LLM output — can corrupt nested fences
-- `benchmarks/swebench.py` says `requires_docker = True` but never uses Docker
+- All three benchmark adapters use Docker — `swebench.py` applies test_patch + agent patch in container, `terminal_bench.py` builds task Docker image and runs tests in container
 
 ## CONVENTIONS
 
