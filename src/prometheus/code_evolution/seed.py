@@ -61,12 +61,14 @@ def run(
     api_key: str = typer.Option("", "--api-key", envvar="OPENAI_API_KEY"),
     base_url: Optional[str] = typer.Option(None, "--base-url"),
     system_prompt: str = typer.Option(
-        "You are a coding assistant. You can read files, write files, "
-        "list directories, and execute shell commands to solve tasks. "
+        "You are an expert coding assistant. You solve programming tasks "
+        "by reading files, understanding code, making targeted edits, "
+        "and running tests to verify your changes. Always read relevant "
+        "files before editing. Run tests after making changes. "
         "Work inside the given workspace directory.",
         "--system-prompt",
     ),
-    max_iterations: int = typer.Option(30, "--max-iterations"),
+    max_iterations: int = typer.Option(40, "--max-iterations"),
 ) -> None:
     from agent.agent import run_agent
 
@@ -102,7 +104,10 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "File path"},
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to workspace",
+                    },
                 },
                 "required": ["path"],
             },
@@ -112,17 +117,48 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write content to a file, creating it if needed.",
+            "description": "Write content to a file, creating dirs if needed.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "File path"},
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to workspace",
+                    },
                     "content": {
                         "type": "string",
-                        "description": "Content to write",
+                        "description": "Full file content to write",
                     },
                 },
                 "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": (
+                "Edit a file by replacing an exact string match. "
+                "Use read_file first to see the current content."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to workspace",
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact text to find and replace",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Replacement text",
+                    },
+                },
+                "required": ["path", "old_text", "new_text"],
             },
         },
     },
@@ -136,10 +172,35 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Directory path",
+                        "description": "Directory path (default: .)",
                         "default": ".",
                     },
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": (
+                "Search for a pattern in files using grep. "
+                "Returns matching lines with file paths."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Search pattern (regex)",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search (default: .)",
+                        "default": ".",
+                    },
+                },
+                "required": ["pattern"],
             },
         },
     },
@@ -153,10 +214,30 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Shell command",
+                        "description": "Shell command to run",
                     },
                 },
                 "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_tests",
+            "description": (
+                "Run pytest on the workspace or a specific test file. "
+                "Returns test output with pass/fail results."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "test_path": {
+                        "type": "string",
+                        "description": "Test file or dir (default: .)",
+                        "default": ".",
+                    },
+                },
             },
         },
     },
@@ -191,6 +272,26 @@ def execute_tool(
             target.write_text(args["content"], encoding="utf-8")
             return f"Wrote {len(args['content'])} bytes to {args['path']}"
 
+        if name == "edit_file":
+            target = _resolve_safe(workspace, args["path"])
+            if target is None:
+                return "Error: path escapes workspace"
+            if not target.exists():
+                return f"Error: file not found: {args['path']}"
+            content = target.read_text(encoding="utf-8")
+            old = args["old_text"]
+            new = args["new_text"]
+            if old not in content:
+                return f"Error: old_text not found in {args['path']}"
+            if content.count(old) > 1:
+                return (
+                    f"Error: old_text found {content.count(old)} times "
+                    f"in {args['path']}. Provide more context."
+                )
+            content = content.replace(old, new, 1)
+            target.write_text(content, encoding="utf-8")
+            return f"Edited {args['path']}"
+
         if name == "list_directory":
             target = _resolve_safe(workspace, args.get("path", "."))
             if target is None:
@@ -202,6 +303,26 @@ def execute_tool(
                 f"{e.name}/" if e.is_dir() else e.name for e in entries
             )
 
+        if name == "search_files":
+            target = _resolve_safe(workspace, args.get("path", "."))
+            if target is None:
+                return "Error: path escapes workspace"
+            result = subprocess.run(
+                ["grep", "-rn", "--include=*.py",
+                 args["pattern"], str(target)],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                cwd=str(workspace),
+            )
+            out = result.stdout.strip()
+            if not out:
+                return "No matches found."
+            lines = out.split("\\n")
+            if len(lines) > 50:
+                return "\\n".join(lines[:50]) + f"\\n... ({len(lines)} total)"
+            return out
+
         if name == "execute_command":
             result = subprocess.run(
                 args["command"],
@@ -209,7 +330,29 @@ def execute_tool(
                 cwd=str(workspace),
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=60,
+            )
+            out = ""
+            if result.stdout:
+                out += result.stdout
+            if result.stderr:
+                out += f"\\nSTDERR:\\n{result.stderr}"
+            if result.returncode != 0:
+                out += f"\\nExit code: {result.returncode}"
+            return out.strip() or "(no output)"
+
+        if name == "run_tests":
+            test_path = args.get("test_path", ".")
+            target = _resolve_safe(workspace, test_path)
+            if target is None:
+                return "Error: path escapes workspace"
+            result = subprocess.run(
+                ["python", "-m", "pytest", str(target),
+                 "-x", "--tb=short", "-q"],
+                cwd=str(workspace),
+                capture_output=True,
+                text=True,
+                timeout=60,
             )
             out = ""
             if result.stdout:
@@ -221,8 +364,99 @@ def execute_tool(
             return out.strip() or "(no output)"
 
         return f"Error: unknown tool: {name}"
+    except subprocess.TimeoutExpired:
+        return f"Error: {name} timed out"
     except Exception as exc:
         return f"Error executing {name}: {exc}"
+"""
+
+_SEED_PLANNER_PY = """\
+from __future__ import annotations
+
+
+def create_plan(prompt: str) -> list[str]:
+    steps = []
+    steps.append("Read relevant files to understand the codebase")
+    if any(kw in prompt.lower() for kw in ["fix", "bug", "error", "fail"]):
+        steps.append("Identify the root cause of the issue")
+        steps.append("Implement the fix")
+        steps.append("Run tests to verify the fix")
+    elif any(kw in prompt.lower() for kw in ["write", "create", "add", "implement"]):
+        steps.append("Plan the implementation approach")
+        steps.append("Write the code")
+        steps.append("Run tests to verify correctness")
+    elif any(kw in prompt.lower() for kw in ["refactor", "rename", "move", "change"]):
+        steps.append("Find all references to the target")
+        steps.append("Make the changes across all files")
+        steps.append("Run tests to verify nothing broke")
+    else:
+        steps.append("Analyze what needs to be done")
+        steps.append("Implement the solution")
+        steps.append("Verify the result")
+    return steps
+
+
+def format_plan(steps: list[str]) -> str:
+    lines = ["Plan:"]
+    for i, step in enumerate(steps, 1):
+        lines.append(f"  {i}. {step}")
+    return "\\n".join(lines)
+"""
+
+_SEED_CONTEXT_PY = """\
+from __future__ import annotations
+
+from typing import Any
+
+
+def estimate_tokens(messages: list[dict[str, Any]]) -> int:
+    total = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += len(content) // 4
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict):
+                    total += len(str(item)) // 4
+    return total
+
+
+def should_summarize(
+    messages: list[dict[str, Any]], max_tokens: int = 80000
+) -> bool:
+    return estimate_tokens(messages) > max_tokens
+
+
+def compact_messages(
+    messages: list[dict[str, Any]], keep_recent: int = 10
+) -> list[dict[str, Any]]:
+    if len(messages) <= keep_recent + 1:
+        return messages
+
+    system = messages[0] if messages[0].get("role") == "system" else None
+    recent = messages[-keep_recent:]
+    old = messages[1:-keep_recent] if system else messages[:-keep_recent]
+
+    summary_parts = []
+    for msg in old:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        if isinstance(content, str) and content.strip():
+            summary_parts.append(f"[{role}]: {content[:200]}")
+
+    summary_text = (
+        "Previous conversation summary:\\n"
+        + "\\n".join(summary_parts[-20:])
+    )
+    summary_msg = {"role": "user", "content": summary_text}
+
+    result: list[dict[str, Any]] = []
+    if system:
+        result.append(system)
+    result.append(summary_msg)
+    result.extend(recent)
+    return result
 """
 
 _SEED_AGENT_PY = """\
@@ -234,6 +468,8 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from agent.context import compact_messages, should_summarize
+from agent.planner import create_plan, format_plan
 from agent.tools import TOOL_SCHEMAS, execute_tool
 
 
@@ -244,7 +480,7 @@ async def run_agent(
     model: str,
     api_key: str,
     base_url: str | None = None,
-    max_iterations: int = 30,
+    max_iterations: int = 40,
 ) -> tuple[str, int]:
     kwargs: dict[str, Any] = {"api_key": api_key}
     if base_url:
@@ -252,14 +488,25 @@ async def run_agent(
     client = AsyncOpenAI(**kwargs)
 
     total_tokens = 0
-    augmented_prompt = f"Working directory: {workspace}\\n\\n{prompt}"
+
+    plan = create_plan(prompt)
+    plan_text = format_plan(plan)
+
+    augmented_prompt = (
+        f"Working directory: {workspace}\\n\\n"
+        f"{plan_text}\\n\\n"
+        f"Task: {prompt}"
+    )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": augmented_prompt},
     ]
 
     output = ""
-    for _ in range(max_iterations):
+    for iteration in range(max_iterations):
+        if should_summarize(messages):
+            messages = compact_messages(messages)
+
         response = await client.chat.completions.create(
             model=model,
             max_tokens=4096,
@@ -287,6 +534,7 @@ async def run_agent(
                 args = json.loads(fn.arguments)
             except json.JSONDecodeError:
                 args = {}
+
             result = execute_tool(fn.name, args, workspace)
             messages.append(
                 {
@@ -316,6 +564,8 @@ def create_seed_package() -> AgentPackage:
             "src/agent/__main__.py": _SEED_MAIN_PY,
             "src/agent/cli.py": _SEED_CLI_PY,
             "src/agent/tools.py": _SEED_TOOLS_PY,
+            "src/agent/planner.py": _SEED_PLANNER_PY,
+            "src/agent/context.py": _SEED_CONTEXT_PY,
             "src/agent/agent.py": _SEED_AGENT_PY,
         },
     )

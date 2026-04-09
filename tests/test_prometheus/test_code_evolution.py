@@ -147,7 +147,7 @@ class TestSeedPackage:
         pkg = create_seed_package()
         assert pkg.package_id == "seed"
         assert pkg.generation == 0
-        assert len(pkg.files) == 7
+        assert len(pkg.files) == 9
 
     def test_seed_files_contain_required_content(
         self,
@@ -158,6 +158,13 @@ class TestSeedPackage:
         )
         assert "FROM" in pkg.files["Dockerfile"]
         assert "run_agent" in pkg.files["src/agent/agent.py"]
+        assert "src/agent/planner.py" in pkg.files
+        assert "src/agent/context.py" in pkg.files
+        assert "create_plan" in pkg.files["src/agent/planner.py"]
+        assert "should_summarize" in pkg.files["src/agent/context.py"]
+        assert "edit_file" in pkg.files["src/agent/tools.py"]
+        assert "search_files" in pkg.files["src/agent/tools.py"]
+        assert "run_tests" in pkg.files["src/agent/tools.py"]
 
 
 # ── TestDryRunCodeMutator ────────────────────────────────────
