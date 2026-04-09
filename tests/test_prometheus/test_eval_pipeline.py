@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 from pathlib import Path
-from prometheus.config.harness_config import HarnessConfig, WorkflowPrompts
+from prometheus.config.harness_config import HarnessConfig, WorkflowConfig, WorkflowPhase
 from prometheus.eval.sandbox import TaskSandbox
 from prometheus.eval.query_runner import run_eval_query, DryRunAgentClient, QueryResult
 from prometheus.eval.runner import EvalRunner
@@ -108,7 +108,35 @@ class TestEvalRunner:
         assert len(report.results) == 2
 
     @pytest.mark.asyncio
-    async def test_workflow_prompts_applied(self):
+    async def test_workflow_phases_executed(self):
+        class CaptureClient:
+            prompts: list[str] = []
+
+            async def run_task(self, prompt, system_prompt, max_iterations, workspace):
+                CaptureClient.prompts.append(prompt)
+                return "phase output", 100
+
+        CaptureClient.prompts = []
+        config = HarnessConfig(
+            system_prompt="sys",
+            workflow=WorkflowConfig(
+                phases=[
+                    WorkflowPhase(name="planning", prompt_template="PLAN: $task", max_iterations=5),
+                    WorkflowPhase(
+                        name="execution", prompt_template="DO: $task\nPLAN: $previous_output"
+                    ),
+                ],
+            ),
+        )
+        runner = EvalRunner([AlwaysPassTask()], CaptureClient())
+        await runner.evaluate(config)
+        assert len(CaptureClient.prompts) == 2
+        assert "PLAN:" in CaptureClient.prompts[0]
+        assert "DO:" in CaptureClient.prompts[1]
+        assert "phase output" in CaptureClient.prompts[1]
+
+    @pytest.mark.asyncio
+    async def test_few_shot_injected(self):
         class CaptureClient:
             last_prompt: str = ""
 
@@ -116,11 +144,52 @@ class TestEvalRunner:
                 CaptureClient.last_prompt = prompt
                 return "ok", 100
 
+        from prometheus.config.harness_config import FewShotExample
+
         config = HarnessConfig(
             system_prompt="sys",
-            workflow_prompts=WorkflowPrompts(pre_task="BEFORE:", post_task="AFTER:"),
+            few_shot_examples=[FewShotExample(task="add 1+1", solution="2")],
         )
         runner = EvalRunner([AlwaysPassTask()], CaptureClient())
         await runner.evaluate(config)
-        assert "BEFORE:" in CaptureClient.last_prompt
-        assert "AFTER:" in CaptureClient.last_prompt
+        assert "add 1+1" in CaptureClient.last_prompt
+        assert "2" in CaptureClient.last_prompt
+
+    @pytest.mark.asyncio
+    async def test_custom_tools_in_system_prompt(self):
+        class CaptureClient:
+            last_system: str = ""
+
+            async def run_task(self, prompt, system_prompt, max_iterations, workspace):
+                CaptureClient.last_system = system_prompt
+                return "ok", 100
+
+        from prometheus.config.harness_config import CustomToolDef
+
+        config = HarnessConfig(
+            system_prompt="base",
+            custom_tools=[
+                CustomToolDef(
+                    name="search_and_read",
+                    description="grep then read",
+                    sub_tools=["execute", "read_file"],
+                ),
+            ],
+        )
+        runner = EvalRunner([AlwaysPassTask()], CaptureClient())
+        await runner.evaluate(config)
+        assert "search_and_read" in CaptureClient.last_system
+        assert "grep then read" in CaptureClient.last_system
+
+    @pytest.mark.asyncio
+    async def test_backward_compat_workflow_prompts(self):
+        config = HarnessConfig.model_validate(
+            {
+                "system_prompt": "test",
+                "workflow_prompts": {"pre_task": "BEFORE", "post_task": "AFTER"},
+            }
+        )
+        assert len(config.workflow.phases) == 1
+        assert "BEFORE" in config.workflow.phases[0].prompt_template
+        assert "AFTER" in config.workflow.phases[0].prompt_template
+        assert "$task" in config.workflow.phases[0].prompt_template

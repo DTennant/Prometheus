@@ -3,7 +3,8 @@ from __future__ import annotations
 from prometheus.config.harness_config import (
     HarnessConfig,
     HarnessParameters,
-    WorkflowPrompts,
+    WorkflowConfig,
+    WorkflowPhase,
 )
 
 
@@ -36,7 +37,9 @@ def create_seed_harness() -> HarnessConfig:
     return HarnessConfig(
         system_prompt=_SEED_SYSTEM_PROMPT,
         tool_descriptions=[],
-        workflow_prompts=WorkflowPrompts(),
+        workflow=WorkflowConfig(
+            phases=[WorkflowPhase(name="execution", prompt_template="$task")],
+        ),
         parameters=HarnessParameters(max_iterations=30, timeout_per_task=600),
         custom_tools=[],
         few_shot_examples=[],
@@ -49,7 +52,27 @@ def create_human_baseline_harness() -> HarnessConfig:
     return HarnessConfig(
         system_prompt=_HUMAN_BASELINE_SYSTEM_PROMPT,
         tool_descriptions=[],
-        workflow_prompts=WorkflowPrompts(),
+        workflow=WorkflowConfig(
+            phases=[
+                WorkflowPhase(
+                    name="planning",
+                    prompt_template="Analyze this task and create a step-by-step plan:\n\n$task",
+                    max_iterations=5,
+                    pass_output_as="scratchpad",
+                ),
+                WorkflowPhase(
+                    name="execution",
+                    prompt_template="Execute the following task. Use your plan as guidance.\n\nPlan:\n$scratchpad\n\nTask:\n$task",
+                    max_iterations=30,
+                ),
+                WorkflowPhase(
+                    name="verification",
+                    prompt_template="Review your work on this task. Check for errors and fix them.\n\nTask:\n$task\n\nYour output:\n$previous_output",
+                    max_iterations=10,
+                ),
+            ],
+            scratchpad_enabled=True,
+        ),
         parameters=HarnessParameters(max_iterations=50, timeout_per_task=600),
         custom_tools=[],
         few_shot_examples=[],

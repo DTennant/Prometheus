@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from pathlib import Path
 
-from prometheus.config.harness_config import HarnessConfig
-from prometheus.eval.query_runner import AgentClient, QueryResult, run_eval_query
+from prometheus.config.harness_config import HarnessConfig, WorkflowPhase
+from prometheus.eval.query_runner import AgentClient, run_eval_query
 from prometheus.eval.sandbox import TaskSandbox
 from prometheus.eval.scorer import EvalReport
-from prometheus.eval.task import Task, TaskResult
+from prometheus.eval.task import Task, TaskInstance, TaskResult
 from prometheus.logging.experiment_logger import ExperimentLogger
 
 log = logging.getLogger(__name__)
@@ -27,68 +27,45 @@ class EvalRunner:
     async def evaluate(self, config: HarnessConfig) -> EvalReport:
         all_results: list[TaskResult] = []
 
+        system_prompt = self._build_system_prompt(config)
+
         for task in self._tasks:
             for instance in task.get_instances():
                 with TaskSandbox() as sandbox:
                     workspace = sandbox.setup(instance)
 
-                    full_prompt = ""
-                    if config.workflow_prompts.pre_task:
-                        full_prompt += config.workflow_prompts.pre_task + "\n\n"
-                    full_prompt += instance.prompt
-                    if config.workflow_prompts.post_task:
-                        full_prompt += "\n\n" + config.workflow_prompts.post_task
-
-                    query_result = await run_eval_query(
-                        client=self._client,
-                        prompt=full_prompt,
-                        system_prompt=config.system_prompt,
-                        max_iterations=config.parameters.max_iterations,
-                        timeout=config.parameters.timeout_per_task,
-                        workspace=workspace,
+                    task_prompt = self._build_task_prompt(config, instance)
+                    output, total_tokens, wall_time, error = await self._run_workflow(
+                        config,
+                        task_prompt,
+                        system_prompt,
+                        workspace,
                     )
 
-                    if query_result.error:
+                    if error:
                         result = TaskResult(
                             instance_id=instance.instance_id,
                             passed=False,
                             score=0.0,
-                            tokens_used=query_result.tokens_used,
-                            wall_time_seconds=query_result.wall_time_seconds,
-                            raw_output=query_result.output,
-                            error=query_result.error,
+                            tokens_used=total_tokens,
+                            wall_time_seconds=wall_time,
+                            raw_output=output,
+                            error=error,
                         )
                     else:
-                        result = task.score(instance, workspace, query_result.output)
+                        result = task.score(instance, workspace, output)
                         result = TaskResult(
                             instance_id=result.instance_id,
                             passed=result.passed,
                             score=result.score,
-                            tokens_used=query_result.tokens_used,
-                            wall_time_seconds=query_result.wall_time_seconds,
-                            raw_output=query_result.output,
+                            tokens_used=total_tokens,
+                            wall_time_seconds=wall_time,
+                            raw_output=output,
                             error=result.error,
                         )
 
                     all_results.append(result)
-
-                    if self._logger:
-                        self._logger.log_eval_result(
-                            task_id=instance.instance_id,
-                            config_id=config.config_id,
-                            passed=result.passed,
-                            score=result.score,
-                            tokens_used=result.tokens_used,
-                            wall_time=result.wall_time_seconds,
-                            error=result.error,
-                        )
-                        if not result.passed and self._logger:
-                            self._logger.log_failure_case(
-                                task_id=instance.instance_id,
-                                config_id=config.config_id,
-                                error_details=result.error or "incorrect output",
-                                agent_output=result.raw_output,
-                            )
+                    self._log_result(result, config.config_id)
 
         scores: dict[str, float] = {}
         if all_results:
@@ -102,3 +79,104 @@ class EvalRunner:
             config_id=config.config_id,
             generation=config.generation,
         )
+
+    def _build_system_prompt(self, config: HarnessConfig) -> str:
+        parts = [config.system_prompt]
+
+        if config.custom_tools:
+            tool_lines = []
+            for ct in config.custom_tools:
+                tool_lines.append(
+                    f"- {ct.name}: {ct.description} "
+                    f"(uses: {', '.join(ct.sub_tools)}, strategy: {ct.strategy})"
+                )
+            parts.append("\n## Composite Tools\n" + "\n".join(tool_lines))
+
+        if config.tool_descriptions:
+            desc_lines = [f"- {td.name}: {td.description}" for td in config.tool_descriptions]
+            parts.append("\n## Available Tools\n" + "\n".join(desc_lines))
+
+        return "\n".join(parts)
+
+    def _build_task_prompt(self, config: HarnessConfig, instance: TaskInstance) -> str:
+        parts: list[str] = []
+
+        if config.few_shot_examples:
+            examples = config.few_shot_examples[:5]
+            example_text = "\n\n".join(
+                f"### Example {i + 1}\n**Task:** {ex.task}\n**Solution:** {ex.solution}"
+                for i, ex in enumerate(examples)
+            )
+            parts.append(f"## Examples\n{example_text}")
+
+        parts.append(instance.prompt)
+        return "\n\n".join(parts)
+
+    async def _run_workflow(
+        self,
+        config: HarnessConfig,
+        task_prompt: str,
+        system_prompt: str,
+        workspace: Path,
+    ) -> tuple[str, int, float, str | None]:
+        phases = [p for p in config.workflow.phases if p.enabled]
+        if not phases:
+            phases = [WorkflowPhase(name="execution", prompt_template="$task")]
+
+        scratchpad = ""
+        previous_output = ""
+        total_tokens = 0
+        total_time = 0.0
+        last_error: str | None = None
+
+        for phase in phases:
+            prompt = phase.render(
+                task=task_prompt,
+                scratchpad=scratchpad,
+                previous_output=previous_output,
+            )
+
+            query_result = await run_eval_query(
+                client=self._client,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                max_iterations=phase.max_iterations,
+                timeout=config.parameters.timeout_per_task,
+                workspace=workspace,
+            )
+
+            total_tokens += query_result.tokens_used
+            total_time += query_result.wall_time_seconds
+
+            if query_result.error:
+                last_error = f"Phase '{phase.name}': {query_result.error}"
+                break
+
+            previous_output = query_result.output
+
+            if config.workflow.scratchpad_enabled and phase.pass_output_as == "scratchpad":
+                scratchpad += f"\n## {phase.name}\n{query_result.output}"
+            elif phase.pass_output_as == "context":
+                scratchpad += f"\n## {phase.name}\n{query_result.output}"
+
+        return previous_output, total_tokens, total_time, last_error
+
+    def _log_result(self, result: TaskResult, config_id: str) -> None:
+        if not self._logger:
+            return
+        self._logger.log_eval_result(
+            task_id=result.instance_id,
+            config_id=config_id,
+            passed=result.passed,
+            score=result.score,
+            tokens_used=result.tokens_used,
+            wall_time=result.wall_time_seconds,
+            error=result.error,
+        )
+        if not result.passed:
+            self._logger.log_failure_case(
+                task_id=result.instance_id,
+                config_id=config_id,
+                error_details=result.error or "incorrect output",
+                agent_output=result.raw_output,
+            )

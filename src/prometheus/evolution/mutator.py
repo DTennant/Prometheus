@@ -49,12 +49,34 @@ def _build_mutation_prompt(
 
 ## Your Task
 Modify the harness config to improve performance. You can change:
+
+### Prompts & Knowledge
 - system_prompt: The instructions given to the agent
 - tool_descriptions: How tools are described (name + description pairs)
-- workflow_prompts: pre_task and post_task prompts for reflection
-- parameters: max_iterations (1-200), temperature (0.0-2.0), timeout_per_task (30-3600), retry_on_error, scratchpad_enabled
+- few_shot_examples: Example task/solution pairs (max 20) — these are injected into the task prompt
+
+### Workflow Structure (THIS IS KEY — design the agent's execution pattern)
+- workflow.phases: A list of execution phases. Each phase has:
+  - name: Phase identifier (e.g., "planning", "execution", "verification", "reflection")
+  - enabled: true/false to toggle phases
+  - prompt_template: Template using $task, $scratchpad, $previous_output placeholders
+  - max_iterations: Max LLM calls for this phase (1-200)
+  - pass_output_as: "context" (available as $previous_output) or "scratchpad" (appended to $scratchpad) or "discard"
+- workflow.scratchpad_enabled: Enable cross-phase memory via $scratchpad
+
+Example multi-phase workflow:
+  phases: [
+    {{"name": "planning", "prompt_template": "Analyze and plan: $task", "max_iterations": 5, "pass_output_as": "scratchpad"}},
+    {{"name": "execution", "prompt_template": "Execute using plan:\\n$scratchpad\\n\\nTask: $task", "max_iterations": 30}},
+    {{"name": "verification", "prompt_template": "Verify your solution:\\n$previous_output\\n\\nOriginal task: $task", "max_iterations": 10}}
+  ]
+
+### Tools
 - custom_tools: Composite tools built from base tools (read_file, write_file, execute, list_directory)
-- few_shot_examples: Example task/solution pairs (max 20)
+  Each has: name, description, sub_tools (list), strategy ("sequential"/"parallel"), routing_prompt
+
+### Parameters
+- parameters.max_iterations (1-200), parameters.temperature (0.0-2.0), parameters.timeout_per_task (30-3600), parameters.retry_on_error
 
 Output ONLY a valid JSON object matching the HarnessConfig schema. No markdown, no explanation, just JSON."""
 
