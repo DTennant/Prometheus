@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Protocol
+from typing import Protocol
 from uuid import uuid4
 
 from prometheus.config.harness_config import HarnessConfig
 from prometheus.config.schema_validator import validate_harness_config
 from prometheus.eval.scorer import EvalReport
-from prometheus.eval.task import TaskResult
 from prometheus.evolution.history import EvolutionHistory
 
 log = logging.getLogger(__name__)
@@ -96,7 +95,7 @@ async def mutate_config(
             cleaned = raw_response.strip()
             if cleaned.startswith("```"):
                 lines = cleaned.split("\n")
-                lines = [l for l in lines if not l.strip().startswith("```")]
+                lines = [line for line in lines if not line.strip().startswith("```")]
                 cleaned = "\n".join(lines)
 
             parsed = json.loads(cleaned)
@@ -119,7 +118,10 @@ async def mutate_config(
 
 
 class DryRunLLMClient:
-    """Returns slightly modified configs for testing without real API calls."""
+    """Returns meaningfully varied configs for testing without real API calls."""
+
+    def __init__(self) -> None:
+        self._call_count = 0
 
     async def generate(self, prompt: str) -> str:
         import re
@@ -128,18 +130,110 @@ class DryRunLLMClient:
         if match:
             try:
                 config_data = json.loads(match.group(1))
-                config_data["system_prompt"] = (
-                    config_data.get("system_prompt", "") + "\nBe more careful and systematic."
-                )
-                config_data["parameters"]["max_iterations"] = min(
-                    config_data.get("parameters", {}).get("max_iterations", 30) + 5, 200
-                )
+                strategy_idx = self._call_count % 5
+                self._call_count += 1
+
+                if strategy_idx == 0:
+                    # Add planning + execution workflow
+                    config_data["system_prompt"] = (
+                        config_data.get("system_prompt", "") + "\nPlan before coding."
+                    )
+                    config_data["workflow"] = {
+                        "phases": [
+                            {
+                                "name": "planning",
+                                "prompt_template": "Plan: $task",
+                                "max_iterations": 5,
+                                "pass_output_as": "scratchpad",
+                            },
+                            {
+                                "name": "execution",
+                                "prompt_template": (
+                                    "Execute using plan:\n$scratchpad\n\nTask: $task"
+                                ),
+                                "max_iterations": 30,
+                            },
+                        ],
+                        "scratchpad_enabled": True,
+                    }
+                elif strategy_idx == 1:
+                    # Add verification phase
+                    config_data["system_prompt"] = (
+                        config_data.get("system_prompt", "") + "\nAlways verify your solution."
+                    )
+                    config_data["workflow"] = {
+                        "phases": [
+                            {
+                                "name": "execution",
+                                "prompt_template": "$task",
+                                "max_iterations": 25,
+                            },
+                            {
+                                "name": "verify",
+                                "prompt_template": ("Verify: $previous_output\nTask: $task"),
+                                "max_iterations": 10,
+                            },
+                        ],
+                    }
+                elif strategy_idx == 2:
+                    # Tune parameters + add few-shot
+                    config_data["system_prompt"] = (
+                        config_data.get("system_prompt", "") + "\nBe more careful and systematic."
+                    )
+                    params = config_data.get("parameters", {})
+                    params["max_iterations"] = min(
+                        params.get("max_iterations", 30) + 5,
+                        200,
+                    )
+                    params["temperature"] = 0.7
+                    config_data["parameters"] = params
+                    config_data["few_shot_examples"] = [
+                        {
+                            "task": "Write a function to sort a list",
+                            "solution": ("def sort_list(lst): return sorted(lst)"),
+                        },
+                    ]
+                elif strategy_idx == 3:
+                    # Add tool descriptions
+                    config_data["system_prompt"] = (
+                        config_data.get("system_prompt", "") + "\nUse tools efficiently."
+                    )
+                    config_data["tool_descriptions"] = [
+                        {
+                            "name": "read_file",
+                            "description": ("Read file contents. Use before modifying."),
+                        },
+                        {
+                            "name": "execute",
+                            "description": ("Run shell commands. Always check exit code."),
+                        },
+                    ]
+                    params = config_data.get("parameters", {})
+                    params["max_iterations"] = min(
+                        params.get("max_iterations", 30) + 10,
+                        200,
+                    )
+                    config_data["parameters"] = params
+                else:
+                    # Conservative — just tune prompt
+                    config_data["system_prompt"] = (
+                        config_data.get("system_prompt", "") + "\nBe more careful and systematic."
+                    )
+                    params = config_data.get("parameters", {})
+                    params["max_iterations"] = min(
+                        params.get("max_iterations", 30) + 5,
+                        200,
+                    )
+                    config_data["parameters"] = params
+
                 return json.dumps(config_data)
             except (json.JSONDecodeError, KeyError):
                 pass
+
+        self._call_count += 1
         return json.dumps(
             {
-                "system_prompt": "You are a coding assistant. Be systematic and thorough.",
+                "system_prompt": ("You are a coding assistant. Be systematic and thorough."),
                 "parameters": {"max_iterations": 35},
             }
         )

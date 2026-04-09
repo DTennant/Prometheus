@@ -72,6 +72,35 @@ class TestMutator:
         assert result.generation == 1
         assert result.parent_id == "p1"
 
+    @pytest.mark.asyncio
+    async def test_dry_run_client_diverse_mutations(self) -> None:
+        client = DryRunLLMClient()
+        config = HarnessConfig(system_prompt="original", config_id="p1")
+        fail_result = TaskResult(
+            "t1",
+            False,
+            0.0,
+            100,
+            1.0,
+            "failed",
+            "error",
+        )
+        report = EvalReport(
+            results=[fail_result],
+            config_id="p1",
+        )
+        history = EvolutionHistory()
+        configs = []
+        for _ in range(5):
+            result = await mutate_config(client, config, report, history)
+            configs.append(result)
+
+        prompts = {c.system_prompt for c in configs}
+        assert len(prompts) >= 3
+
+        has_multi_phase = any(len(c.workflow.phases) > 1 for c in configs)
+        assert has_multi_phase
+
     def test_prompt_includes_failures(self):
         config = HarnessConfig(system_prompt="test")
         report = _make_report([True, False, False])
