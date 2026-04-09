@@ -56,14 +56,18 @@ class EvolutionLoop:
                 reports.append(report)
 
             self._history.add_generation(gen, beam, reports)
-            best_score = max(r.scores.get("composite", r.accuracy) for r in reports)
+            paired = list(zip(beam, reports))
+            paired.sort(key=lambda p: p[1].scores.get("composite", p[1].accuracy), reverse=True)
+            best_config, best_report = paired[0]
+            best_score = best_report.scores.get("composite", best_report.accuracy)
+
             self._logger.log_generation(
                 gen,
                 [c.config_id for c in beam],
                 best_score,
                 {"beam_size": len(beam)},
             )
-            self._logger.save_checkpoint(beam[0].model_dump(), gen)
+            self._logger.save_checkpoint(best_config.model_dump(), gen)
 
             log.info("Generation %d: best_score=%.3f", gen, best_score)
 
@@ -88,7 +92,7 @@ class EvolutionLoop:
                 log.warning("No valid mutations produced, keeping current beam")
                 continue
 
-            candidate_reports = []
+            candidate_reports: list[EvalReport] = []
             for candidate in candidates:
                 report = await self._eval_runner.evaluate(candidate)
                 report = EvalReport(
@@ -102,15 +106,23 @@ class EvolutionLoop:
                 )
                 candidate_reports.append(report)
 
-            all_pairs = list(zip(beam + candidates, reports + candidate_reports))
+            all_configs = beam + candidates
+            all_reports = reports + candidate_reports
+            all_pairs = list(zip(all_configs, all_reports))
             beam = self._selector.select(all_pairs)
+
+            config_to_report = {c.config_id: r for c, r in zip(all_configs, all_reports)}
+            reports = [
+                config_to_report[c.config_id] for c in beam if c.config_id in config_to_report
+            ]
 
             if not beam:
                 log.error("Beam empty after selection, restoring seed")
                 beam = [seed_config]
+                reports = []
 
         if not reports:
             return beam[0]
-        best_pairs = list(zip(beam, reports[: len(beam)]))
-        best_pairs.sort(key=lambda p: p[1].scores.get("composite", p[1].accuracy), reverse=True)
-        return best_pairs[0][0]
+        final_pairs = list(zip(beam, reports[: len(beam)]))
+        final_pairs.sort(key=lambda p: p[1].scores.get("composite", p[1].accuracy), reverse=True)
+        return final_pairs[0][0]
