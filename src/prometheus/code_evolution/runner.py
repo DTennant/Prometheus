@@ -60,30 +60,61 @@ class DockerRunner:
         if self._system_prompt:
             cmd.extend(["--system-prompt", self._system_prompt])
 
-        volumes: dict[str, dict[str, str]] = {
-            str(workspace): {"bind": "/workspace", "mode": "rw"},
-        }
-
         docker_sock = Path("/var/run/docker.sock")
+        extra_volumes: dict[str, dict[str, str]] = {}
         if docker_sock.exists():
-            volumes[str(docker_sock)] = {
+            extra_volumes[str(docker_sock)] = {
                 "bind": "/var/run/docker.sock",
                 "mode": "rw",
             }
 
         try:
-            container = self._docker.containers.run(
+            import io
+            import tarfile
+
+            container = self._docker.containers.create(
                 image_tag,
                 command=cmd,
-                volumes=volumes,
-                detach=True,
+                volumes=extra_volumes,
                 mem_limit="2g",
                 cpu_count=2,
                 network_mode="host",
             )
+
+            tar_buf = io.BytesIO()
+            with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+                for fpath in workspace.rglob("*"):
+                    if fpath.is_file():
+                        rel = str(fpath.relative_to(workspace))
+                        tar.add(str(fpath), arcname=rel)
+            tar_buf.seek(0)
+            container.put_archive("/workspace", tar_buf)
+
+            container.start()
             result = container.wait(timeout=self._timeout)
             stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
             stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
+
+            try:
+                archive, _ = container.get_archive("/workspace")
+                out_buf = io.BytesIO()
+                for chunk in archive:
+                    out_buf.write(chunk)
+                out_buf.seek(0)
+                with tarfile.open(fileobj=out_buf, mode="r") as tar:
+                    for member in tar.getmembers():
+                        if member.isfile():
+                            name = member.name
+                            if name.startswith("workspace/"):
+                                name = name[len("workspace/") :]
+                            dest = workspace / name
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            f = tar.extractfile(member)
+                            if f:
+                                dest.write_bytes(f.read())
+            except Exception:
+                pass
+
             container.remove(force=True)
 
             if result.get("StatusCode", 1) != 0 and stderr:

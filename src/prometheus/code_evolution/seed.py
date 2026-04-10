@@ -27,6 +27,7 @@ _SEED_DOCKERFILE = """\
 FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends git && \\
     rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /workspace
 WORKDIR /app
 COPY . .
 RUN pip install --no-cache-dir -e .
@@ -409,39 +410,50 @@ from __future__ import annotations
 from typing import Any
 
 
-def estimate_tokens(messages: list[dict[str, Any]]) -> int:
+def _get_field(msg: Any, field: str, default: Any = "") -> Any:
+    if isinstance(msg, dict):
+        return msg.get(field, default)
+    return getattr(msg, field, default)
+
+
+def estimate_tokens(messages: list[Any]) -> int:
     total = 0
     for msg in messages:
-        content = msg.get("content", "")
+        content = _get_field(msg, "content", "")
         if isinstance(content, str):
             total += len(content) // 4
         elif isinstance(content, list):
             for item in content:
-                if isinstance(item, dict):
-                    total += len(str(item)) // 4
+                total += len(str(item)) // 4
+        else:
+            total += len(str(content or "")) // 4
     return total
 
 
 def should_summarize(
-    messages: list[dict[str, Any]], max_tokens: int = 80000
+    messages: list[Any], max_tokens: int = 80000
 ) -> bool:
     return estimate_tokens(messages) > max_tokens
 
 
 def compact_messages(
-    messages: list[dict[str, Any]], keep_recent: int = 10
-) -> list[dict[str, Any]]:
+    messages: list[Any], keep_recent: int = 10
+) -> list[Any]:
     if len(messages) <= keep_recent + 1:
         return messages
 
-    system = messages[0] if messages[0].get("role") == "system" else None
+    system = (
+        messages[0]
+        if _get_field(messages[0], "role") == "system"
+        else None
+    )
     recent = messages[-keep_recent:]
     old = messages[1:-keep_recent] if system else messages[:-keep_recent]
 
     summary_parts = []
     for msg in old:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
+        role = _get_field(msg, "role", "unknown")
+        content = _get_field(msg, "content", "")
         if isinstance(content, str) and content.strip():
             summary_parts.append(f"[{role}]: {content[:200]}")
 

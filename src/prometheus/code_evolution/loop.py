@@ -75,7 +75,7 @@ class CodeEvolutionLoop:
             best_score = 0.0
             for pkg, report in zip(beam, reports):
                 composite = report.compute_composite(self._config.token_budget)
-                if composite >= best_score:
+                if composite > best_score:
                     best_score = composite
                     best_pkg = pkg
 
