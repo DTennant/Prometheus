@@ -173,7 +173,7 @@ class _SWEBenchTask(Task):
 
 def _build_test_command(fail_to_pass: str) -> str:
     if not fail_to_pass:
-        return 'echo "NO_TESTS_SPECIFIED"'
+        return "exit 1  # no FAIL_TO_PASS tests specified"
 
     try:
         tests = json.loads(fail_to_pass)
@@ -183,4 +183,4 @@ def _build_test_command(fail_to_pass: str) -> str:
     except (json.JSONDecodeError, TypeError):
         pass
 
-    return "python -m pytest -x --tb=short"
+    return "exit 1  # FAIL_TO_PASS could not be parsed"

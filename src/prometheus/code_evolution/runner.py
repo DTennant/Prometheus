@@ -115,8 +115,6 @@ class DockerRunner:
             except Exception:
                 pass
 
-            container.remove(force=True)
-
             if result.get("StatusCode", 1) != 0 and stderr:
                 log.debug(
                     "Agent stderr for %s: %s",
@@ -131,6 +129,11 @@ class DockerRunner:
                 exc,
             )
             return "", 0, elapsed
+        finally:
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
 
         elapsed = time.monotonic() - start
         exit_code = result.get("StatusCode", 1)
