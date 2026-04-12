@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import pytest
 from pathlib import Path
 
 from prometheus.analysis.compare import load_run, compare_runs, format_comparison

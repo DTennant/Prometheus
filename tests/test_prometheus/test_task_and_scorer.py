@@ -1,5 +1,4 @@
 from __future__ import annotations
-import pytest
 from pathlib import Path
 from prometheus.eval.task import Task, TaskInstance, TaskResult
 from prometheus.eval.scorer import composite_score, EvalReport

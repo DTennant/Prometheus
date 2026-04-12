@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 from prometheus.eval.benchmarks import list_benchmarks, get_benchmark
-from prometheus.eval.benchmarks.base import BenchmarkAdapter
 from prometheus.eval.benchmarks.humaneval_plus import HumanEvalPlusAdapter, _HumanEvalPlusTask
 from prometheus.eval.benchmarks.terminal_bench import TerminalBenchAdapter, _TerminalBenchTask
 from prometheus.eval.benchmarks.swebench import SWEBenchAdapter, _SWEBenchTask
-from prometheus.eval.task import TaskInstance
 from prometheus.eval.sandbox import TaskSandbox
 
 

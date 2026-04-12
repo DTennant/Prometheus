@@ -3,7 +3,7 @@ import asyncio
 from pathlib import Path
 from prometheus.config.harness_config import HarnessConfig, WorkflowConfig, WorkflowPhase
 from prometheus.eval.sandbox import TaskSandbox
-from prometheus.eval.query_runner import run_eval_query, DryRunAgentClient, QueryResult
+from prometheus.eval.query_runner import run_eval_query, DryRunAgentClient
 from prometheus.eval.runner import EvalRunner
 from prometheus.eval.task import Task, TaskInstance, TaskResult
 

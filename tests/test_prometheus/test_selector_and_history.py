@@ -1,4 +1,3 @@
-import pytest
 from prometheus.config.harness_config import HarnessConfig, WorkflowConfig, WorkflowPhase
 from prometheus.eval.scorer import EvalReport
 from prometheus.eval.task import TaskResult

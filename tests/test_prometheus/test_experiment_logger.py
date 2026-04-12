@@ -1,5 +1,4 @@
 import json
-import pytest
 from pathlib import Path
 from prometheus.logging.experiment_logger import ExperimentLogger
 
@@ -7,7 +6,7 @@ from prometheus.logging.experiment_logger import ExperimentLogger
 class TestExperimentLogger:
     def test_creates_dir_and_config(self, tmp_path: Path):
         run_dir = tmp_path / "run1"
-        logger = ExperimentLogger(run_dir, config={"model": "test"})
+        ExperimentLogger(run_dir, config={"model": "test"})
         assert run_dir.exists()
         config = json.loads((run_dir / "config.json").read_text())
         assert config["model"] == "test"
