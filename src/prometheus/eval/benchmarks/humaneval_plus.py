@@ -106,9 +106,9 @@ class _HumanEvalPlusTask(Task):
         solution_path = workspace / "solution.py"
         test_path = workspace / "test_solution.py"
 
-        code = _strip_markdown_fences(agent_output)
-
-        solution_path.write_text(code, encoding="utf-8")
+        if not solution_path.exists():
+            code = _strip_markdown_fences(agent_output)
+            solution_path.write_text(code, encoding="utf-8")
         test_path.write_text(instance.expected_output, encoding="utf-8")
 
         try:
