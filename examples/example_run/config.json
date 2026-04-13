@@ -1,0 +1,18 @@
+{
+  "run_id": "76663375",
+  "model": {
+    "name": "claude-sonnet-4-6",
+    "api_format": "openai",
+    "api_key_env": "OPENAI_API_KEY",
+    "base_url": "https://litellm-research.weco-ai.com/v1/"
+  },
+  "generations": 3,
+  "beam_size": 2,
+  "mutations_per_parent": 1,
+  "eval_timeout": 600,
+  "output_dir": "/app/runs",
+  "seed": 42,
+  "task_suite": "default",
+  "dry_run": false,
+  "token_budget": 50000
+}
