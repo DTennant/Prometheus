@@ -1,0 +1,46 @@
+{
+  "package_id": "068a779a",
+  "generation": 2,
+  "parent_id": "36ea3d1c",
+  "model": "claude-sonnet-4-6",
+  "accuracy": 0.923,
+  "composite_score": 0.1384,
+  "tasks_passed": 12,
+  "tasks_total": 13,
+  "lineage": [
+    {
+      "generation": 0,
+      "package_id": "seed",
+      "parent_id": null,
+      "accuracy": 0.538,
+      "tasks_passed": 7,
+      "mutations": []
+    },
+    {
+      "generation": 1,
+      "package_id": "36ea3d1c",
+      "parent_id": "seed",
+      "accuracy": 0.538,
+      "tasks_passed": 7,
+      "mutations": [
+        "Enhanced system prompt with task-specific rules",
+        "Increased max_tokens from 4096 to 8192"
+      ]
+    },
+    {
+      "generation": 2,
+      "package_id": "068a779a",
+      "parent_id": "36ea3d1c",
+      "accuracy": 0.923,
+      "tasks_passed": 12,
+      "mutations": [
+        "Added _validate_python_content() with prose detection and compile() check",
+        "Added check_syntax tool using compile() + AST",
+        "Enhanced write_file and edit_file with Python syntax validation",
+        "Added IMPORTANT REMINDERS block to task prompt",
+        "Added include parameter to search_files tool",
+        "Added extra_args parameter to run_tests tool"
+      ]
+    }
+  ]
+}

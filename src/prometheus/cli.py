@@ -1,0 +1,450 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional
+
+import typer
+
+if TYPE_CHECKING:
+    from prometheus.code_evolution.package import AgentPackage
+    from prometheus.config.experiment_config import ExperimentConfig
+    from prometheus.eval.query_runner import AgentClient
+    from prometheus.eval.task import Task
+    from prometheus.evolution.mutator import LLMClient
+    from prometheus.logging.experiment_logger import ExperimentLogger
+
+app = typer.Typer(
+    name="pyre",
+    help="Prometheus: Self-Bootstrapping Agent Harness — let models evolve their own optimal harness.",
+    add_completion=False,
+    invoke_without_command=True,
+)
+
+
+@app.command()
+def run(
+    model: str = typer.Option("claude-sonnet-4-20250514", "--model", "-m"),
+    generations: int = typer.Option(20, "--generations", "-g"),
+    beam_size: int = typer.Option(5, "--beam-size", "-k"),
+    mutations_per_parent: int = typer.Option(3, "--mutations-per-parent"),
+    output_dir: str = typer.Option("runs", "--output-dir", "-o"),
+    api_format: str = typer.Option("anthropic", "--api-format"),
+    base_url: Optional[str] = typer.Option(None, "--base-url"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
+    task_suite: str = typer.Option("default", "--task-suite", "-t"),
+    token_budget: int = typer.Option(50000, "--token-budget"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Simulate evolution without API calls"),
+    resume: Optional[str] = typer.Option(None, "--resume", help="Resume from checkpoint directory"),
+    seed_config: Optional[str] = typer.Option(
+        None, "--seed-config", help="Path to seed config JSON"
+    ),
+    task_limit: Optional[int] = typer.Option(
+        None, "--task-limit", help="Max tasks to load from suite"
+    ),
+    mode: str = typer.Option("config", "--mode", help="Evolution mode: config or code"),
+    stage: int = typer.Option(
+        1,
+        "--stage",
+        help="Code evolution stage: 1=minimal, 2=enhanced, 3=swebench",
+    ),
+) -> None:
+    """Run the self-bootstrapping evolution loop."""
+    from prometheus.config.experiment_config import ExperimentConfig, ModelConfig
+    from prometheus.eval.tasks import get_task_suite
+    from prometheus.logging.experiment_logger import ExperimentLogger
+
+    resolved_key = (
+        api_key or os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+    )
+
+    from typing import Literal, cast
+
+    fmt = cast(
+        Literal["anthropic", "openai"],
+        api_format if api_format in ("anthropic", "openai") else "anthropic",
+    )
+    model_config = ModelConfig(
+        name=model,
+        api_format=fmt,
+        base_url=base_url,
+        api_key_env=("ANTHROPIC_API_KEY" if fmt == "anthropic" else "OPENAI_API_KEY"),
+    )
+
+    experiment_config = ExperimentConfig(
+        model=model_config,
+        generations=generations,
+        beam_size=beam_size,
+        mutations_per_parent=mutations_per_parent,
+        output_dir=Path(output_dir),
+        task_suite=task_suite,
+        token_budget=token_budget,
+        dry_run=dry_run,
+    )
+
+    run_dir = Path(output_dir) / experiment_config.run_id
+    logger = ExperimentLogger(run_dir, config=experiment_config.model_dump())
+
+    tasks = get_task_suite(task_suite, limit=task_limit)
+
+    typer.echo(f"Starting evolution: {generations} generations, beam_size={beam_size}")
+    typer.echo(f"Model: {model}, Task suite: {task_suite} ({len(tasks)} tasks)")
+    typer.echo(f"Output: {run_dir}")
+
+    if mode == "code":
+        _run_code_evolution(
+            experiment_config,
+            tasks,
+            logger,
+            run_dir,
+            resolved_key,
+            api_format,
+            base_url,
+            model,
+            dry_run,
+            generations,
+            stage,
+            output_dir,
+        )
+    else:
+        _run_config_evolution(
+            experiment_config,
+            tasks,
+            logger,
+            run_dir,
+            resolved_key,
+            api_format,
+            base_url,
+            model,
+            dry_run,
+            seed_config,
+            resume,
+        )
+
+
+def _run_config_evolution(
+    experiment_config: "ExperimentConfig",
+    tasks: list["Task"],
+    logger: "ExperimentLogger",
+    run_dir: Path,
+    resolved_key: str,
+    api_format: str,
+    base_url: str | None,
+    model: str,
+    dry_run: bool,
+    seed_config: str | None,
+    resume: str | None,
+) -> None:
+    from prometheus.config.harness_config import HarnessConfig
+    from prometheus.eval.query_runner import DryRunAgentClient
+    from prometheus.eval.runner import EvalRunner
+    from prometheus.evolution.loop import EvolutionLoop
+    from prometheus.evolution.mutator import DryRunLLMClient
+    from prometheus.evolution.seed import create_seed_harness
+
+    agent_client: AgentClient
+    llm_client: LLMClient
+    if dry_run:
+        agent_client = DryRunAgentClient()
+        llm_client = DryRunLLMClient()
+        typer.echo("DRY RUN MODE: using simulated responses\n")
+    else:
+        agent_client = _build_agent_client(api_format, resolved_key, base_url, model)
+        llm_client = _build_llm_client(api_format, resolved_key, base_url, model)
+        typer.echo("")
+
+    eval_runner = EvalRunner(tasks, agent_client, logger)
+
+    if seed_config:
+        seed_data = json.loads(Path(seed_config).read_text(encoding="utf-8"))
+        seed = HarnessConfig.model_validate(seed_data)
+    elif resume:
+        checkpoint_path = Path(resume)
+        seed_data = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        seed = HarnessConfig.model_validate(seed_data)
+    else:
+        seed = create_seed_harness()
+
+    loop = EvolutionLoop(experiment_config, eval_runner, llm_client, logger)
+
+    best = asyncio.run(loop.run(seed))
+
+    best_path = run_dir / "best_config.json"
+    best_path.write_text(best.model_dump_json(indent=2), encoding="utf-8")
+    typer.echo(f"\nEvolution complete! Best config saved to: {best_path}")
+    typer.echo(f"Best accuracy: {loop.history.get_best(1)[0][1]:.1%}")
+
+
+def _resolve_stage_seed(stage: int, output_dir: str) -> "AgentPackage":
+    from prometheus.code_evolution.package import AgentPackage
+    from prometheus.code_evolution.seed import create_seed_package
+
+    if stage <= 1:
+        return create_seed_package()
+
+    if stage == 2:
+        example_dir = Path(__file__).resolve().parent.parent.parent / "examples" / "evolved_agent"
+        if example_dir.is_dir():
+            return AgentPackage.from_directory(
+                example_dir,
+                package_id="enhanced_seed",
+                generation=0,
+            )
+        pkg = create_seed_package()
+        pkg.package_id = "enhanced_seed"
+        return pkg
+
+    best_agent_dir = _find_latest_best_agent(output_dir)
+    if best_agent_dir is None:
+        typer.echo(
+            "Error: --stage 3 requires a previous run with "
+            "best_agent/ output. Run stage 1 or 2 first.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    return AgentPackage.from_directory(
+        best_agent_dir,
+        package_id="stage2_winner",
+        generation=0,
+    )
+
+
+def _find_latest_best_agent(output_dir: str) -> Path | None:
+    runs = Path(output_dir)
+    if not runs.is_dir():
+        return None
+    candidates: list[Path] = []
+    for run_dir in runs.iterdir():
+        best = run_dir / "best_agent"
+        if best.is_dir() and (best / "pyproject.toml").exists():
+            candidates.append(best)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _run_code_evolution(
+    experiment_config: "ExperimentConfig",
+    tasks: list["Task"],
+    logger: "ExperimentLogger",
+    run_dir: Path,
+    resolved_key: str,
+    api_format: str,
+    base_url: str | None,
+    model: str,
+    dry_run: bool,
+    generations: int,
+    stage: int = 1,
+    output_dir: str = "runs",
+) -> None:
+    from prometheus.code_evolution.builder import (
+        DockerBuilder,
+        DryRunDockerBuilder,
+    )
+    from prometheus.code_evolution.loop import CodeEvolutionLoop
+    from prometheus.code_evolution.mutator import DryRunCodeMutator
+    from prometheus.code_evolution.runner import (
+        DockerRunner,
+        DryRunDockerRunner,
+    )
+
+    if dry_run:
+        builder: DockerBuilder | DryRunDockerBuilder = DryRunDockerBuilder()
+        runner: DockerRunner | DryRunDockerRunner = DryRunDockerRunner()
+        code_llm: LLMClient = DryRunCodeMutator()
+        typer.echo("DRY RUN MODE: using simulated responses")
+    else:
+        builder = DockerBuilder()
+        runner = DockerRunner(
+            model=model,
+            api_key=resolved_key,
+            base_url=base_url or "",
+        )
+        code_llm = _build_llm_client(api_format, resolved_key, base_url, model)
+
+    seed_pkg = _resolve_stage_seed(stage, output_dir)
+    typer.echo(f"Stage {stage}: seed={seed_pkg.package_id}\n")
+
+    code_loop = CodeEvolutionLoop(
+        experiment_config,
+        code_llm,
+        builder,
+        runner,
+        tasks,
+        logger,
+    )
+
+    best_pkg = asyncio.run(code_loop.run(seed_pkg))
+
+    best_dir = run_dir / "best_agent"
+    typer.echo(f"\nEvolution complete! Best agent saved to: {best_dir}")
+    history = code_loop.history.get_best(1)
+    if history:
+        typer.echo(f"Best score: {history[0][1]:.4f}")
+    typer.echo(
+        f"Files: {len(best_pkg.files)} ({sum(len(c) for c in best_pkg.files.values())} bytes)"
+    )
+
+
+@app.command("eval-only")
+def eval_only(
+    config_path: str = typer.Argument(..., help="Path to harness config JSON"),
+    model: str = typer.Option("claude-sonnet-4-20250514", "--model", "-m"),
+    output_dir: str = typer.Option("eval_results", "--output-dir", "-o"),
+    task_suite: str = typer.Option("default", "--task-suite", "-t"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    api_format: str = typer.Option("anthropic", "--api-format"),
+    api_key: Optional[str] = typer.Option(None, "--api-key"),
+    base_url: Optional[str] = typer.Option(None, "--base-url"),
+) -> None:
+    """Evaluate a single harness config without evolution."""
+    from prometheus.config.harness_config import HarnessConfig
+    from prometheus.eval.query_runner import DryRunAgentClient
+    from prometheus.eval.runner import EvalRunner
+    from prometheus.eval.tasks import get_task_suite
+    from prometheus.logging.experiment_logger import ExperimentLogger
+
+    config_data = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    config = HarnessConfig.model_validate(config_data)
+    tasks = get_task_suite(task_suite)
+
+    out_dir = Path(output_dir)
+    logger = ExperimentLogger(out_dir)
+
+    client: AgentClient
+    if dry_run:
+        client = DryRunAgentClient()
+    else:
+        resolved_key = api_key or os.environ.get("ANTHROPIC_API_KEY") or ""
+        client = _build_agent_client(api_format, resolved_key, base_url, model)
+
+    runner = EvalRunner(tasks, client, logger)
+    report = asyncio.run(runner.evaluate(config))
+
+    typer.echo(f"Accuracy: {report.accuracy:.1%}")
+    typer.echo(f"Total tokens: {report.total_tokens}")
+    typer.echo(f"Tasks: {sum(1 for r in report.results if r.passed)}/{len(report.results)} passed")
+
+    results_path = out_dir / "eval_report.json"
+    results_path.write_text(
+        json.dumps(
+            {
+                "accuracy": report.accuracy,
+                "total_tokens": report.total_tokens,
+                "results": [
+                    {
+                        "id": r.instance_id,
+                        "passed": r.passed,
+                        "tokens": r.tokens_used,
+                        "error": r.error,
+                    }
+                    for r in report.results
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    typer.echo(f"Report saved to: {results_path}")
+
+
+@app.command()
+def compare(
+    run_dirs: list[str] = typer.Argument(..., help="Paths to run directories"),
+) -> None:
+    """Compare results across multiple evolution runs."""
+    from prometheus.analysis.compare import compare_runs, format_comparison
+
+    paths = [Path(d) for d in run_dirs]
+    for p in paths:
+        if not p.exists():
+            typer.echo(f"Directory not found: {p}", err=True)
+            raise typer.Exit(1)
+
+    rows = compare_runs(paths)
+    typer.echo(format_comparison(rows))
+
+
+@app.command()
+def show(
+    run_dir: str = typer.Argument(..., help="Path to run directory"),
+    generation: int = typer.Option(
+        -1, "--generation", "-g", help="Show specific generation (-1 = latest)"
+    ),
+) -> None:
+    """Display results from a completed run."""
+    from prometheus.analysis.compare import load_run
+
+    summary = load_run(Path(run_dir))
+    typer.echo(f"Run: {summary.run_dir}")
+    typer.echo(f"Generations: {summary.total_generations}")
+    typer.echo(f"Best score: {summary.best_score:.4f}")
+
+    if summary.config:
+        model = summary.config.get("model", {})
+        if isinstance(model, dict):
+            typer.echo(f"Model: {model.get('name', 'unknown')}")
+
+    if generation >= 0 and generation < len(summary.generations):
+        gen = summary.generations[generation]
+        typer.echo(f"\nGeneration {generation}:")
+        typer.echo(f"  Best score: {gen.get('best_score', 0):.4f}")
+        typer.echo(f"  Configs: {gen.get('config_ids', [])}")
+    elif summary.generations:
+        latest = summary.generations[-1]
+        typer.echo(f"\nLatest generation ({latest.get('generation', '?')}):")
+        typer.echo(f"  Best score: {latest.get('best_score', 0):.4f}")
+
+    best_config_path = Path(run_dir) / "best_config.json"
+    if best_config_path.exists():
+        typer.echo(f"\nBest config: {best_config_path}")
+
+
+@app.command()
+def benchmarks() -> None:
+    """List available benchmark suites and their installation status."""
+    from prometheus.eval.benchmarks import list_benchmarks
+
+    typer.echo("Available benchmark suites:\n")
+    for bench in list_benchmarks():
+        status = "INSTALLED" if bench["available"] else "NOT INSTALLED"
+        docker = " [Docker required]" if bench["requires_docker"] else ""
+        typer.echo(f"  {bench['name']:<20} {status:<15}{docker}")
+        typer.echo(f"    {bench['description']}")
+        if not bench["available"]:
+            typer.echo(f"    Install: {bench['install_hint']}")
+        typer.echo()
+
+    typer.echo("Built-in suites (always available):")
+    for name in ["default", "code_generation", "file_manipulation", "debugging", "reasoning"]:
+        typer.echo(f"  {name}")
+
+    typer.echo("\nUse: pyre run --task-suite <name> [--limit N]")
+
+
+def _build_agent_client(
+    api_format: str, api_key: str, base_url: str | None, model: str
+) -> AgentClient:
+    if not api_key:
+        raise typer.BadParameter("API key required for non-dry-run mode. Set --api-key or env var.")
+    if api_format == "openai":
+        from prometheus.api_clients import OpenAIAgentClient
+
+        return OpenAIAgentClient(api_key, model, base_url=base_url)
+    from prometheus.api_clients import AnthropicAgentClient
+
+    return AnthropicAgentClient(api_key, model, base_url=base_url)
+
+
+def _build_llm_client(api_format: str, api_key: str, base_url: str | None, model: str) -> LLMClient:
+    if not api_key:
+        raise typer.BadParameter("API key required for non-dry-run mode. Set --api-key or env var.")
+    if api_format == "openai":
+        from prometheus.api_clients import OpenAILLMClient
+
+        return OpenAILLMClient(api_key, model, base_url=base_url)
+    from prometheus.api_clients import AnthropicLLMClient
+
+    return AnthropicLLMClient(api_key, model, base_url=base_url)

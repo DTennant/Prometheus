@@ -1,0 +1,261 @@
+from __future__ import annotations
+
+import json
+import logging
+from typing import Protocol
+from uuid import uuid4
+
+from prometheus.config.harness_config import HarnessConfig
+from prometheus.config.schema_validator import validate_harness_config
+from prometheus.eval.scorer import EvalReport
+from prometheus.evolution.history import EvolutionHistory
+
+log = logging.getLogger(__name__)
+
+MAX_MUTATION_RETRIES = 3
+
+
+class LLMClient(Protocol):
+    async def generate(self, prompt: str) -> str: ...
+
+
+def _build_mutation_prompt(
+    config: HarnessConfig,
+    report: EvalReport,
+    history: EvolutionHistory,
+) -> str:
+    passed_cases = [r for r in report.results if r.passed]
+    failed_cases = [r for r in report.results if not r.passed]
+
+    passed_summary = ""
+    for r in passed_cases[:5]:
+        passed_summary += f"\n- {r.instance_id} (tokens: {r.tokens_used})"
+
+    failed_summary = ""
+    for r in failed_cases[:10]:
+        err = r.error or "incorrect output"
+        failed_summary += f"\n\n### {r.instance_id}"
+        failed_summary += f"\nError: {err[:500]}"
+        if r.raw_output:
+            snippet = r.raw_output[:300].replace("\n", "\n  ")
+            failed_summary += f"\nAgent output: {snippet}"
+
+    return f"""You are evolving an agent harness config. \
+This config controls an agent run by YOU — the same \
+model reading this. Optimize for how YOU work: what \
+prompts help YOU think clearly, what workflow phases \
+help YOU avoid mistakes, what tool descriptions help \
+YOU use tools correctly.
+
+Analyze the failures below. For each, identify the \
+root cause — was it a prompt issue, a workflow issue, \
+a tool description issue, or a parameter issue? Then \
+make targeted changes.
+
+## Current Harness Config
+```json
+{config.model_dump_json(indent=2)}
+```
+
+## Evaluation Results
+- Accuracy: {report.accuracy:.1%}
+- Total tokens used: {report.total_tokens}
+- Passed: {len(passed_cases)}/{len(report.results)}
+{passed_summary}
+
+## Failed Tasks (ANALYZE THESE){failed_summary}
+
+## Evolution History
+{history.summary_for_mutation()}
+
+## Your Task
+Modify the harness config to improve performance. You can change:
+
+### Prompts & Knowledge
+- system_prompt: The instructions given to the agent
+- tool_descriptions: How tools are described (name + description pairs)
+- few_shot_examples: Example task/solution pairs (max 20) — these are injected into the task prompt
+
+### Workflow Structure (THIS IS KEY — design the agent's execution pattern)
+- workflow.phases: A list of execution phases. Each phase has:
+  - name: Phase identifier (e.g., "planning", "execution", "verification", "reflection")
+  - enabled: true/false to toggle phases
+  - prompt_template: Template using $task, $scratchpad, $previous_output placeholders
+  - max_iterations: Max LLM calls for this phase (1-200)
+  - pass_output_as: "context" (available as $previous_output) or "scratchpad" (appended to $scratchpad) or "discard"
+- workflow.scratchpad_enabled: Enable cross-phase memory via $scratchpad
+
+Example multi-phase workflow:
+  phases: [
+    {{"name": "planning", "prompt_template": "Analyze and plan: $task", "max_iterations": 5, "pass_output_as": "scratchpad"}},
+    {{"name": "execution", "prompt_template": "Execute using plan:\\n$scratchpad\\n\\nTask: $task", "max_iterations": 30}},
+    {{"name": "verification", "prompt_template": "Verify your solution:\\n$previous_output\\n\\nOriginal task: $task", "max_iterations": 10}}
+  ]
+
+### Tools
+- custom_tools: Composite tools built from base tools (read_file, write_file, execute, list_directory)
+  Each has: name, description, sub_tools (list), strategy ("sequential"/"parallel"), routing_prompt
+
+### Parameters
+- parameters.max_iterations (1-200), parameters.temperature (0.0-2.0), parameters.timeout_per_task (30-3600), parameters.retry_on_error
+
+Output ONLY a valid JSON object matching the HarnessConfig schema. No markdown, no explanation, just JSON."""
+
+
+async def mutate_config(
+    client: LLMClient,
+    config: HarnessConfig,
+    report: EvalReport,
+    history: EvolutionHistory,
+) -> HarnessConfig:
+    prompt = _build_mutation_prompt(config, report, history)
+
+    for attempt in range(MAX_MUTATION_RETRIES):
+        try:
+            raw_response = await client.generate(prompt)
+            # Strip markdown fences if present
+            cleaned = raw_response.strip()
+            if cleaned.startswith("```"):
+                lines = cleaned.split("\n")
+                lines = [line for line in lines if not line.strip().startswith("```")]
+                cleaned = "\n".join(lines)
+
+            parsed = json.loads(cleaned)
+            # Override metadata fields
+            parsed["generation"] = config.generation + 1
+            parsed["parent_id"] = config.config_id
+            parsed["config_id"] = uuid4().hex[:8]
+
+            new_config = HarnessConfig.model_validate(parsed)
+            errors = validate_harness_config(new_config)
+            if errors:
+                log.warning("Mutation validation failed (attempt %d): %s", attempt + 1, errors)
+                continue
+            return new_config
+        except (json.JSONDecodeError, Exception) as exc:
+            log.warning("Mutation parse failed (attempt %d): %s", attempt + 1, exc)
+            continue
+
+    raise RuntimeError(f"Failed to produce valid mutation after {MAX_MUTATION_RETRIES} attempts")
+
+
+class DryRunLLMClient:
+    """Returns meaningfully varied configs for testing without real API calls."""
+
+    def __init__(self) -> None:
+        self._call_count = 0
+
+    async def generate(self, prompt: str) -> str:
+        import re
+
+        match = re.search(r"```json\n(.*?)```", prompt, re.DOTALL)
+        if match:
+            try:
+                config_data = json.loads(match.group(1))
+                strategy_idx = self._call_count % 5
+                self._call_count += 1
+
+                if strategy_idx == 0:
+                    # Add planning + execution workflow
+                    config_data["system_prompt"] = (
+                        config_data.get("system_prompt", "") + "\nPlan before coding."
+                    )
+                    config_data["workflow"] = {
+                        "phases": [
+                            {
+                                "name": "planning",
+                                "prompt_template": "Plan: $task",
+                                "max_iterations": 5,
+                                "pass_output_as": "scratchpad",
+                            },
+                            {
+                                "name": "execution",
+                                "prompt_template": (
+                                    "Execute using plan:\n$scratchpad\n\nTask: $task"
+                                ),
+                                "max_iterations": 30,
+                            },
+                        ],
+                        "scratchpad_enabled": True,
+                    }
+                elif strategy_idx == 1:
+                    # Add verification phase
+                    config_data["system_prompt"] = (
+                        config_data.get("system_prompt", "") + "\nAlways verify your solution."
+                    )
+                    config_data["workflow"] = {
+                        "phases": [
+                            {
+                                "name": "execution",
+                                "prompt_template": "$task",
+                                "max_iterations": 25,
+                            },
+                            {
+                                "name": "verify",
+                                "prompt_template": ("Verify: $previous_output\nTask: $task"),
+                                "max_iterations": 10,
+                            },
+                        ],
+                    }
+                elif strategy_idx == 2:
+                    # Tune parameters + add few-shot
+                    config_data["system_prompt"] = (
+                        config_data.get("system_prompt", "") + "\nBe more careful and systematic."
+                    )
+                    params = config_data.get("parameters", {})
+                    params["max_iterations"] = min(
+                        params.get("max_iterations", 30) + 5,
+                        200,
+                    )
+                    params["temperature"] = 0.7
+                    config_data["parameters"] = params
+                    config_data["few_shot_examples"] = [
+                        {
+                            "task": "Write a function to sort a list",
+                            "solution": ("def sort_list(lst): return sorted(lst)"),
+                        },
+                    ]
+                elif strategy_idx == 3:
+                    # Add tool descriptions
+                    config_data["system_prompt"] = (
+                        config_data.get("system_prompt", "") + "\nUse tools efficiently."
+                    )
+                    config_data["tool_descriptions"] = [
+                        {
+                            "name": "read_file",
+                            "description": ("Read file contents. Use before modifying."),
+                        },
+                        {
+                            "name": "execute",
+                            "description": ("Run shell commands. Always check exit code."),
+                        },
+                    ]
+                    params = config_data.get("parameters", {})
+                    params["max_iterations"] = min(
+                        params.get("max_iterations", 30) + 10,
+                        200,
+                    )
+                    config_data["parameters"] = params
+                else:
+                    # Conservative — just tune prompt
+                    config_data["system_prompt"] = (
+                        config_data.get("system_prompt", "") + "\nBe more careful and systematic."
+                    )
+                    params = config_data.get("parameters", {})
+                    params["max_iterations"] = min(
+                        params.get("max_iterations", 30) + 5,
+                        200,
+                    )
+                    config_data["parameters"] = params
+
+                return json.dumps(config_data)
+            except (json.JSONDecodeError, KeyError):
+                pass
+
+        self._call_count += 1
+        return json.dumps(
+            {
+                "system_prompt": ("You are a coding assistant. Be systematic and thorough."),
+                "parameters": {"max_iterations": 35},
+            }
+        )
