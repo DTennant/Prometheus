@@ -12,6 +12,7 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY src/ ./src/
+COPY agent_lib/ ./agent_lib/
 
 RUN pip install --no-cache-dir -e .
 

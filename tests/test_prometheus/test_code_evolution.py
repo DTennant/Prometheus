@@ -147,7 +147,7 @@ class TestSeedPackage:
         pkg = create_seed_package()
         assert pkg.package_id == "seed"
         assert pkg.generation == 0
-        assert len(pkg.files) == 10
+        assert len(pkg.files) >= 10
 
     def test_seed_files_contain_required_content(
         self,

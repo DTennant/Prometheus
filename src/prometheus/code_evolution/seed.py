@@ -92,21 +92,42 @@ def run(
 """
 
 
+def _load_agent_lib() -> dict[str, str]:
+    from pathlib import Path
+
+    lib_dir = Path(__file__).resolve().parent.parent.parent.parent / "agent_lib"
+    files: dict[str, str] = {}
+    if not lib_dir.is_dir():
+        return files
+    for fpath in sorted(lib_dir.rglob("*.py")):
+        rel = f"agent_lib/{fpath.relative_to(lib_dir)}"
+        try:
+            files[rel] = fpath.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+    toml = lib_dir / "pyproject.toml"
+    if toml.exists():
+        files["agent_lib/pyproject.toml"] = toml.read_text(encoding="utf-8")
+    return files
+
+
 def create_seed_package() -> AgentPackage:
+    files = {
+        "pyproject.toml": _SEED_PYPROJECT_TOML,
+        "Dockerfile": _SEED_DOCKERFILE,
+        "src/agent/__init__.py": _SEED_INIT_PY,
+        "src/agent/__main__.py": _SEED_MAIN_PY,
+        "src/agent/cli.py": _SEED_CLI_PY,
+        "src/agent/tools.py": _SEED_TOOLS_PY,
+        "src/agent/prompts.py": _SEED_PROMPTS_PY,
+        "src/agent/context.py": _SEED_CONTEXT_PY,
+        "src/agent/diff.py": _SEED_DIFF_PY,
+        "src/agent/agent.py": _SEED_AGENT_PY,
+    }
+    files.update(_load_agent_lib())
     return AgentPackage(
         package_id="seed",
         generation=0,
         parent_id=None,
-        files={
-            "pyproject.toml": _SEED_PYPROJECT_TOML,
-            "Dockerfile": _SEED_DOCKERFILE,
-            "src/agent/__init__.py": _SEED_INIT_PY,
-            "src/agent/__main__.py": _SEED_MAIN_PY,
-            "src/agent/cli.py": _SEED_CLI_PY,
-            "src/agent/tools.py": _SEED_TOOLS_PY,
-            "src/agent/prompts.py": _SEED_PROMPTS_PY,
-            "src/agent/context.py": _SEED_CONTEXT_PY,
-            "src/agent/diff.py": _SEED_DIFF_PY,
-            "src/agent/agent.py": _SEED_AGENT_PY,
-        },
+        files=files,
     )
