@@ -9,10 +9,14 @@
   <img src="https://img.shields.io/badge/license-MIT-yellow" alt="License">
 </p>
 
-Prometheus evolves agent harnesses through beam-search mutation and evaluation. It has two modes:
+Prometheus evolves agent harnesses through beam-search mutation and evaluation. Give it a model, and it discovers the optimal agent architecture — tools, prompts, error handling, and code structure — by iteratively mutating and testing against real programming tasks.
 
-- **Config mode** (`--mode config`) — evolves the harness configuration (system prompt, workflow, tools, parameters)
-- **Code mode** (`--mode code`) — evolves the entire agent codebase (Python source files), producing a standalone, pip-installable, Docker-buildable agent package each generation
+**Key result**: In a 3-generation run with Claude Sonnet 4, the system evolved a seed agent from **54% → 92% accuracy** by autonomously adding Python syntax validation, a `check_syntax` tool, and targeted prompt improvements. See [Example Evolved Agent](#example-evolved-agent).
+
+It has two modes:
+
+- **Config mode** (`--mode config`) — evolves harness configuration (system prompt, workflow, tools, parameters)
+- **Code mode** (`--mode code`) — evolves the entire agent codebase, producing a standalone, pip-installable, Docker-buildable agent each generation
 
 ---
 
@@ -29,18 +33,17 @@ Prometheus evolves agent harnesses through beam-search mutation and evaluation. 
 git clone https://github.com/DTennant/Prometheus.git
 cd Prometheus
 
-# Install the package
 pip install -e .
 
-# Install with dev tools (for testing/linting)
+# With dev tools (testing/linting)
 pip install -e ".[dev]"
 ```
 
-Verify the installation:
+Verify:
 
 ```bash
 pyre --help
-pytest tests/test_prometheus/ -q   # 144 tests should pass
+pytest tests/test_prometheus/ -q   # 144 tests
 ```
 
 ---
@@ -50,25 +53,25 @@ pytest tests/test_prometheus/ -q   # 144 tests should pass
 ### 1. Dry Run (no API key needed)
 
 ```bash
-# Config evolution — evolves JSON configs
+# Config evolution
 pyre run --dry-run --generations 5 --beam-size 3
 
-# Code evolution — evolves Python agent codebases
+# Code evolution
 pyre run --mode code --dry-run --generations 3 --beam-size 2
 ```
 
-### 2. Real Evolution with an API
+### 2. Real Evolution
 
 ```bash
-# With Anthropic
+# Anthropic
 export ANTHROPIC_API_KEY=sk-...
 pyre run --model claude-sonnet-4-20250514 --generations 10
 
-# With OpenAI
+# OpenAI
 export OPENAI_API_KEY=sk-...
 pyre run --api-format openai --model gpt-4o --generations 10
 
-# With any OpenAI-compatible provider (LiteLLM, vLLM, Ollama, etc.)
+# Any OpenAI-compatible provider (LiteLLM, vLLM, Ollama, etc.)
 pyre run --api-format openai \
     --base-url https://your-proxy.com/v1/ \
     --api-key your-key \
@@ -78,35 +81,25 @@ pyre run --api-format openai \
 
 ### 3. Code Evolution with Docker
 
-Code mode builds and runs each evolved agent inside a Docker container:
-
 ```bash
-# Build the Prometheus Docker image
+# Build Prometheus image
 docker build -t prometheus-evolution \
     --build-arg UID="$(id -u)" \
     --build-arg GID="$(id -g)" .
 
-# Run code evolution in Docker (with LiteLLM example)
+# Run evolution (agents execute in nested Docker containers)
 docker run --rm \
     -v "$(pwd)/runs:/app/runs" \
     -v /var/run/docker.sock:/var/run/docker.sock \
     --group-add "$(stat -c '%g' /var/run/docker.sock)" \
     --network host \
-    -e OPENAI_API_KEY="$YOUR_API_KEY" \
+    -e OPENAI_API_KEY="$KEY" \
     prometheus-evolution \
     run --mode code \
     --api-format openai \
     --base-url https://your-proxy.com/v1/ \
-    --model gpt-4.1-mini \
-    --generations 3 --beam-size 2
-```
-
-Or use the convenience script:
-
-```bash
-export LITELLM_API_KEY=your-key
-export LITELLM_BASE_URL=https://your-proxy.com/v1/
-./run_evolution.sh
+    --model claude-sonnet-4-6 \
+    --generations 5 --beam-size 2
 ```
 
 ---
@@ -114,241 +107,154 @@ export LITELLM_BASE_URL=https://your-proxy.com/v1/
 ## How It Works
 
 ```
-seed → evaluate on tasks → LLM sees failures → mutate → re-evaluate → keep top-K → repeat
+seed → evaluate on tasks → LLM reads failures → mutate code → re-evaluate → keep top-K → repeat
 ```
-
-### Config Mode
-
-Evolves a `HarnessConfig` JSON object controlling:
-
-| Field | Controls |
-|-------|----------|
-| `system_prompt` | Full instructions given to the agent |
-| `tool_descriptions` | How each tool is described to the model |
-| `workflow.phases` | Multi-phase execution (planning → execution → verification) |
-| `parameters` | max_iterations, temperature, timeout, retry |
-| `custom_tools` | Composite tools built from base tools |
-| `few_shot_examples` | Task/solution pairs injected into prompts |
-
-The base tools (`read_file`, `write_file`, `list_directory`, `execute_command`), eval tasks, and model weights are immutable.
 
 ### Code Mode
 
-Evolves a complete Python agent package:
+Evolves a complete Python agent package. The LLM mutator reads all source files plus eval results, then returns targeted file modifications — adding tools, fixing bugs, improving prompts, or restructuring the conversation loop.
 
+Each candidate is built into a Docker image, run against eval tasks in isolated containers, and scored. Workspace files are transferred via `docker cp` for full isolation.
+
+**Seed agent** (9 files, ~17K bytes):
 ```
 seed_agent/
-├── pyproject.toml      # pip-installable
-├── Dockerfile          # Docker-buildable
+├── pyproject.toml          # pip-installable
+├── Dockerfile              # Docker-buildable
 └── src/agent/
-    ├── cli.py          # CLI entry point
-    ├── agent.py        # LLM conversation loop + tool execution
-    └── tools.py        # Tool implementations
+    ├── cli.py              # CLI entry point (--prompt, --workspace, --model)
+    ├── agent.py            # Plan-augmented LLM conversation loop
+    ├── tools.py            # 7 tools (read, write, edit, list, search, exec, test)
+    ├── planner.py          # Task decomposition
+    └── context.py          # Token-aware conversation compaction
 ```
-
-The LLM mutator reads all source files, receives eval results (which tasks passed/failed with error details), and returns a list of file modifications. Each mutation can add tools, change the conversation loop, improve error handling, adjust prompting — anything in the source code.
-
-Each candidate is built into a Docker image, run against all eval tasks in isolated containers, and scored on the host.
 
 ### Staged Evolution
 
-Code evolution supports multi-stage campaigns via `--stage`:
+Multi-stage campaigns via `--stage`:
 
 | Stage | Seed | Tasks | Goal |
 |-------|------|-------|------|
-| 1 (default) | Minimal (7 tools, ~800 lines) | 13 built-in tasks | Evolve tool use, error handling, basic workflow |
-| 2 | Enhanced seed | 13 built-in tasks | Evolve planning, context management |
+| 1 (default) | Minimal (7 tools) | 13 built-in tasks | Evolve tool use, prompting, error handling |
+| 2 | Evolved example agent (8 tools) | 13 built-in tasks | Evolve planning, context management |
 | 3 | Winner of stage 2 | SWE-bench subset | Evolve toward real-world SWE capability |
 
-Each stage uses the previous stage's best agent as its seed:
-
 ```bash
-# Stage 1: basic tool mastery
 pyre run --mode code --stage 1 --generations 8 --beam-size 3
-
-# Stage 2: planning and context (uses stage 1 winner)
 pyre run --mode code --stage 2 --generations 10 --beam-size 3
-
-# Stage 3: real benchmarks (uses stage 2 winner)
-pyre run --mode code --stage 3 --task-suite swebench --task-limit 30 --generations 10
+pyre run --mode code --stage 3 --task-suite swebench --task-limit 30
 ```
 
 ### Eval Suite
 
-13 tasks across 4 categories, scored by `accuracy × (budget / tokens_used)`:
+13 built-in tasks across 4 categories, scored by `accuracy × (budget / tokens_used)`:
 
 | Category | Tasks | What they test |
 |----------|-------|---------------|
-| Code Generation | 5 | merge_intervals, top_k_frequent, LRUCache, Trie, serialize/deserialize tree |
-| File Manipulation | 3 | multi-file rename/refactor, CSV pipeline, test writing |
-| Debugging | 3 | shared-reference corruption, race condition, multi-file dependency |
+| Code Generation | 5 | merge_intervals, top_k_frequent, LRUCache, Trie, tree serialization |
+| File Manipulation | 3 | multi-file rename, CSV pipeline, test writing |
+| Debugging | 3 | shared-reference bug, race condition, multi-file dependency |
 | Reasoning | 2 | topological sort, state machine |
-
-Each task runs the agent in a sandboxed workspace and validates results via subprocess test execution.
 
 ### External Benchmarks
 
-Prometheus integrates with real benchmarks for validation:
-
-| Benchmark | Docker | Install | Tasks |
-|-----------|--------|---------|-------|
-| SWE-bench Verified | Yes (per-instance containers) | `pip install datasets` + Docker | 500 real GitHub issues |
-| HumanEval+ | No (subprocess) | `pip install evalplus` | 164 coding problems with augmented tests |
-| TerminalBench | Yes (Docker Compose) | `pip install terminal-bench pyyaml` | 89 terminal tasks |
+| Benchmark | Docker | Install | Scoring |
+|-----------|--------|---------|---------|
+| **SWE-bench Verified** | Yes — official `swebench/sweb.eval.x86_64.*` images | `pip install datasets` | Applies agent patch + test patch in Docker, runs `FAIL_TO_PASS` tests |
+| **HumanEval+** | No (subprocess) | `pip install evalplus` | Runs base tests + augmented `plus_input` smoke tests, 30s timeout |
+| **TerminalBench** | Yes — builds task Dockerfile | `pip install terminal-bench pyyaml` | Docker build + `docker run` for `run-tests.sh`, compose support |
 
 ```bash
-# List available benchmarks
-pyre benchmarks
-
-# Use SWE-bench as eval suite (first 30 instances)
-pyre run --mode code --task-suite swebench --task-limit 30 --generations 5
-
-# Use HumanEval+ (first 50 problems)
-pyre run --task-suite humaneval_plus --task-limit 50 --generations 5
+pyre benchmarks                                              # List available
+pyre run --task-suite swebench --task-limit 30 --generations 5   # SWE-bench
+pyre run --task-suite humaneval_plus --task-limit 50              # HumanEval+
 ```
-
-SWE-bench uses official pre-built Docker images from `docker.io/swebench/`. First run will pull images automatically.
 
 ---
 
 ## Example Evolved Agent
 
-The `examples/evolved_agent/` directory contains a hand-crafted agent representing what a Stage 2 code evolution output might look like (~1000 lines, 8 tools):
+`examples/evolved_agent/` contains an agent **produced by a real Prometheus evolution run** — not hand-crafted.
 
-```
-examples/evolved_agent/
-├── pyproject.toml          # pip-installable
-├── Dockerfile              # Docker-buildable
-├── lineage.json            # Illustrative 3-generation evolution tree
-└── src/agent/
-    ├── agent.py            # Three-phase loop: plan → execute → verify
-    ├── tools.py            # 8 tools (read, write, edit, search, exec, test, git_diff, list)
-    ├── planner.py           # Task decomposition with step tracking
-    └── context.py          # Token-aware context management
-```
+### Evolution Results
 
-Try it:
+| Generation | Config | Accuracy | Key Mutations |
+|------------|--------|----------|---------------|
+| 0 (seed) | `seed` | 7/13 (54%) | — |
+| 1 | `36ea3d1c` | 7/13 (54%) | Enhanced system prompt, increased max_tokens |
+| 2 | **`068a779a`** | **12/13 (92%)** | Added syntax validation, `check_syntax` tool, IMPORTANT REMINDERS |
+
+The winning mutation analyzed eval failures (agent writing prose into `.py` files) and evolved 3 targeted fixes:
+1. **`_validate_python_content()`** — rejects prose/markdown before writing `.py` files using `compile()` + pattern detection
+2. **`check_syntax` tool** — lets the agent verify Python files after writing
+3. **Prompt engineering** — "IMPORTANT REMINDERS" block preventing markdown in code files
+
+**Model**: `claude-sonnet-4-6` (for both agent execution and mutation). **Run**: 3 generations, beam_size=2.
+
+### Try it
 
 ```bash
 cd examples/evolved_agent
 pip install -e .
+agent run --prompt "Write a merge_intervals function" \
+    --workspace /tmp/ws --api-key $KEY --model claude-sonnet-4-6
 
 # Or via Docker
 docker build -t evolved-agent .
 docker run --rm -v /tmp/ws:/workspace \
     -e OPENAI_API_KEY=$KEY \
-    evolved-agent \
-    --prompt "Fix the bug in main.py" \
-    --workspace /workspace \
-    --model gpt-4o
+    evolved-agent --prompt "Fix the bug" \
+    --workspace /workspace --model gpt-4o
 ```
 
-This agent was not produced by running the evolution loop — see its `README.md` and `lineage.json` for details.
-
----
-
-## CLI Reference
-
-```
-pyre run          Run the evolution loop
-pyre eval-only    Evaluate a single harness config
-pyre compare      Compare multiple evolution runs
-pyre show         Display results from a completed run
-pyre benchmarks   List available benchmark suites
-```
-
-### `pyre run`
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--mode` | `config` | Evolution mode: `config` or `code` |
-| `--stage` | `1` | Code evolution stage: `1`=minimal, `2`=enhanced, `3`=swebench |
-| `-m, --model` | `claude-sonnet-4-20250514` | Model name |
-| `-g, --generations` | `20` | Number of evolution generations |
-| `-k, --beam-size` | `5` | Top-K candidates kept per generation |
-| `--mutations-per-parent` | `3` | Mutations generated per parent |
-| `-o, --output-dir` | `runs` | Output directory |
-| `--api-format` | `anthropic` | API format: `anthropic` or `openai` |
-| `--base-url` | — | Custom API base URL |
-| `--api-key` | — | API key (or use env var) |
-| `-t, --task-suite` | `default` | Task suite name |
-| `--token-budget` | `50000` | Token budget for efficiency scoring |
-| `--dry-run` | — | Simulate without API calls |
-| `--resume` | — | Resume from checkpoint |
-| `--seed-config` | — | Custom seed config JSON |
-| `--task-limit` | — | Max tasks to load |
-
-### Examples
-
-```bash
-# Quick config evolution test
-pyre run --dry-run --generations 3 --beam-size 2
-
-# Full code evolution with DeepSeek
-pyre run --mode code \
-    --api-format openai \
-    --base-url https://api.deepseek.com \
-    --api-key sk-... \
-    --model deepseek-chat \
-    --generations 10 --beam-size 3
-
-# Evaluate an existing config
-pyre eval-only runs/<run_id>/best_config.json --dry-run
-
-# Compare two runs
-pyre compare runs/<run1> runs/<run2>
-```
+See `examples/evolved_agent/lineage.json` for the full evolution tree.
 
 ---
 
 ## Output
 
-### Config Mode
+### Code Mode
 
 ```
 runs/<run_id>/
 ├── config.json                # Experiment parameters
 ├── events.jsonl               # All eval results, generations, failures
-├── checkpoint_gen0000.json    # Best config at generation 0
-├── checkpoint_gen0001.json    # Best config at generation 1
-└── best_config.json           # Final best harness config
-```
-
-### Code Mode
-
-```
-runs/<run_id>/
-├── config.json
-├── events.jsonl
-├── checkpoint_gen0000.json    # Best package manifest at generation 0
+├── checkpoint_gen0000.json    # Best agent at generation 0
 ├── checkpoint_gen0001.json
 └── best_agent/                # Standalone agent package
     ├── pyproject.toml
     ├── Dockerfile
     └── src/agent/
-        ├── cli.py
-        ├── agent.py
-        └── tools.py
 ```
 
-The `best_agent/` directory is a complete, runnable Python project:
+The `best_agent/` directory is a complete, runnable project:
 
 ```bash
 cd runs/<run_id>/best_agent
-
-# Install and run directly
 pip install -e .
-agent run --prompt "Write hello world" --workspace /tmp/test --api-key $KEY --model gpt-4o
-
-# Or build and run as Docker container
-docker build -t my-evolved-agent .
-docker run --rm -v /tmp/ws:/workspace \
-    -e OPENAI_API_KEY=$KEY \
-    my-evolved-agent \
-    --prompt "Solve this task..." \
-    --workspace /workspace \
-    --model gpt-4o
+agent run --prompt "Solve this" --workspace /tmp/ws --api-key $KEY --model gpt-4o
 ```
+
+---
+
+## CLI Reference
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--mode` | `config` | `config` or `code` |
+| `--stage` | `1` | Code evolution stage: `1`/`2`/`3` |
+| `-m, --model` | `claude-sonnet-4-20250514` | Model name |
+| `-g, --generations` | `20` | Evolution generations |
+| `-k, --beam-size` | `5` | Top-K candidates per generation |
+| `--mutations-per-parent` | `3` | Mutations per parent |
+| `-o, --output-dir` | `runs` | Output directory |
+| `--api-format` | `anthropic` | `anthropic` or `openai` |
+| `--base-url` | — | Custom API base URL |
+| `--api-key` | — | API key (or env var) |
+| `-t, --task-suite` | `default` | Task suite: `default`, `swebench`, `humaneval_plus`, `terminal_bench` |
+| `--token-budget` | `50000` | Token budget for efficiency scoring |
+| `--dry-run` | — | Simulate without API calls |
+| `--task-limit` | — | Max tasks to load |
 
 ---
 
@@ -356,33 +262,25 @@ docker run --rm -v /tmp/ws:/workspace \
 
 ```
 src/prometheus/
-├── cli.py                      # pyre CLI (Typer)
-├── api_clients.py              # Anthropic + OpenAI clients with tool execution
-├── config/                     # HarnessConfig + ExperimentConfig
-├── eval/                       # Task evaluation pipeline
-│   ├── tasks/                  # 13 built-in eval tasks
-│   ├── benchmarks/             # External benchmark adapters (SWE-bench, HumanEval+, TerminalBench)
-│   ├── runner.py               # Config-mode evaluation orchestrator
-│   ├── scorer.py               # Composite scoring (accuracy × efficiency)
-│   └── sandbox.py              # Workspace isolation
-├── evolution/                  # Config evolution (--mode config)
-│   ├── seed.py                 # Minimal seed config
-│   ├── mutator.py              # LLM-guided config mutation
-│   ├── selector.py             # Beam selection with deduplication
-│   ├── history.py              # Evolution history tracking
-│   └── loop.py                 # Main evolution loop
-├── code_evolution/             # Code evolution (--mode code)
-│   ├── package.py              # AgentPackage dataclass
-│   ├── seed.py                 # Seed agent source files
-│   ├── mutator.py              # LLM-guided code mutation (file operations)
-│   ├── builder.py              # Docker image builder with caching
-│   ├── runner.py               # Docker-based agent evaluation
-│   ├── selector.py             # Content-hash deduplication
-│   ├── history.py              # Code evolution history
-│   └── loop.py                 # Code evolution loop
-├── logging/                    # JSONL event logger + checkpoints
-├── tools/                      # Composite tool factory
-└── analysis/                   # Cross-run comparison
+├── cli.py                  # pyre CLI (Typer)
+├── api_clients.py          # Anthropic + OpenAI with tool execution
+├── config/                 # HarnessConfig + ExperimentConfig
+├── eval/
+│   ├── tasks/              # 13 built-in eval tasks
+│   ├── benchmarks/         # SWE-bench, HumanEval+, TerminalBench adapters
+│   ├── runner.py           # Config-mode evaluation
+│   ├── scorer.py           # accuracy × efficiency scoring
+│   └── sandbox.py          # Workspace isolation
+├── evolution/              # Config evolution (--mode config)
+├── code_evolution/         # Code evolution (--mode code)
+│   ├── package.py          # AgentPackage dataclass
+│   ├── seed.py             # Seed agent source files
+│   ├── mutator.py          # LLM-guided code mutation
+│   ├── builder.py          # Docker image builder
+│   ├── runner.py           # Docker-based evaluation
+│   └── loop.py             # Beam-search loop
+├── logging/                # JSONL events + checkpoints
+└── analysis/               # Cross-run comparison
 ```
 
 ---
@@ -390,54 +288,18 @@ src/prometheus/
 ## Development
 
 ```bash
-# Install with dev dependencies
 pip install -e ".[dev]"
-
-# Run tests (144 tests, ~4s)
-pytest tests/test_prometheus/ -v
-
-# Lint
+pytest tests/test_prometheus/ -v   # 144 tests, ~4s
 ruff check src/prometheus/
-
-# Type check
 mypy src/prometheus/
-
-# Quick dry-run to verify everything works
 pyre run --dry-run --generations 2 --beam-size 1
 ```
-
-### Adding Eval Tasks
-
-Subclass `Task` from `prometheus.eval.task`:
-
-```python
-from prometheus.eval.task import Task, TaskInstance, TaskResult
-from pathlib import Path
-
-class MyTask(Task):
-    name = "my_task"
-    category = "custom"
-
-    def get_instances(self) -> list[TaskInstance]:
-        return [TaskInstance(
-            instance_id="custom_001",
-            prompt="Write a function that...",
-            expected_output="",
-            setup_files={"starter.py": "# starting code"},
-        )]
-
-    def score(self, instance: TaskInstance, workspace: Path, agent_output: str) -> TaskResult:
-        passed = "expected" in agent_output
-        return TaskResult(instance.instance_id, passed, 1.0 if passed else 0.0, 0, 0.0, agent_output)
-```
-
-Register it in `eval/tasks/__init__.py`.
 
 ---
 
 ## Reference
 
-The `reference/` directory contains an archived copy of the original [OpenHarness](https://github.com/HKUDS/OpenHarness) agent harness — preserved as a read-only design baseline for comparison experiments. Prometheus does not import from it.
+The `reference/` directory contains an archived copy of the original [OpenHarness](https://github.com/HKUDS/OpenHarness) agent — preserved as a read-only design baseline.
 
 ## License
 
