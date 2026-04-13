@@ -18,6 +18,84 @@ log = logging.getLogger(__name__)
 MAX_MUTATION_RETRIES = 3
 
 
+ALWAYS_FULL_FILES = {
+    "src/agent/agent.py",
+    "src/agent/prompts.py",
+}
+MAX_SOURCE_TOKENS = 12000
+
+
+def _summarize_files(
+    files: dict[str, str],
+) -> dict[str, str]:
+    summaries: dict[str, str] = {}
+    for path in sorted(files):
+        content = files[path]
+        lines = content.count("\n") + 1
+        summary = f"{path} ({lines} lines, {len(content)} bytes)"
+        summaries[path] = summary
+    return summaries
+
+
+def _select_files_for_context(
+    package: AgentPackage,
+    report: EvalReport,
+) -> set[str]:
+    selected = set(ALWAYS_FULL_FILES)
+    failed = [r for r in report.results if not r.passed]
+    if not failed:
+        return selected
+
+    error_text = " ".join((r.error or "") + " " + (r.raw_output or "") for r in failed[:10])
+    error_lower = error_text.lower()
+
+    if any(
+        kw in error_lower
+        for kw in [
+            "str_replace",
+            "edit",
+            "old_text",
+            "tool",
+            "search",
+            "grep",
+        ]
+    ):
+        selected.add("src/agent/tools.py")
+    if any(kw in error_lower for kw in ["context", "token", "truncat", "compact"]):
+        selected.add("src/agent/context.py")
+    if any(kw in error_lower for kw in ["diff", "patch", "git"]):
+        selected.add("src/agent/diff.py")
+
+    if len(selected) < 3:
+        selected.add("src/agent/tools.py")
+
+    return {s for s in selected if s in package.files}
+
+
+def _render_context(
+    package: AgentPackage,
+    report: EvalReport,
+) -> str:
+    summaries = _summarize_files(package.files)
+    full_files = _select_files_for_context(package, report)
+
+    parts: list[str] = ["File overview:"]
+    for path, summary in summaries.items():
+        marker = " [FULL BELOW]" if path in full_files else ""
+        parts.append(f"  {summary}{marker}")
+
+    total_tokens = 0
+    for path in sorted(full_files):
+        content = package.files[path]
+        file_tokens = len(content) // 4
+        if total_tokens + file_tokens > MAX_SOURCE_TOKENS:
+            break
+        total_tokens += file_tokens
+        parts.append(f"\n### {path}\n```\n{content}\n```")
+
+    return "\n".join(parts)
+
+
 def _render_files(files: dict[str, str]) -> str:
     parts: list[str] = []
     for path in sorted(files):
@@ -65,9 +143,9 @@ below, see the errors and your previous output, and \
 figure out what YOU would need — better prompts, better \
 tools, better error handling — to get those tasks right.
 
-## Current Source Files
+## Source Files
 
-{_render_files(package.files)}
+{_render_context(package, report)}
 
 ## Evaluation Results
 
@@ -188,8 +266,6 @@ async def mutate_package(
 
 
 class DryRunCodeMutator:
-    """Satisfies LLMClient Protocol for testing."""
-
     def __init__(self) -> None:
         self._call_count = 0
 
@@ -197,7 +273,6 @@ class DryRunCodeMutator:
         strategy = self._call_count % 4
         self._call_count += 1
 
-        # Extract current files from prompt
         file_blocks: dict[str, str] = {}
         pattern = re.compile(
             r"^### (.+?)\n```\n(.*?)\n```",
@@ -208,145 +283,65 @@ class DryRunCodeMutator:
 
         ops: list[dict[str, Any]] = []
 
-        if strategy == 0:
-            # Modify agent.py: add error handling
-            agent = file_blocks.get("src/agent/agent.py", "")
-            if agent:
-                agent = "# Improved error handling\n" + agent
-                agent = agent.replace(
-                    "for _ in range(max_iterations):",
-                    ("for _ in range(max_iterations):\n      try:"),
-                )
-                ops.append(
-                    {
-                        "op": "modify",
-                        "path": "src/agent/agent.py",
-                        "content": agent,
-                    }
-                )
+        prompts = file_blocks.get("src/agent/prompts.py", "")
+        agent = file_blocks.get("src/agent/agent.py", "")
 
-        elif strategy == 1:
-            # Modify tools.py: add docker_run tool
-            tools = file_blocks.get("src/agent/tools.py", "")
-            if tools:
-                docker_schema = (
-                    "    {\n"
-                    '        "type": "function",\n'
-                    '        "function": {\n'
-                    '            "name": "docker_run",\n'
-                    '            "description": '
-                    '"Run a command in a Docker '
-                    'container.",\n'
-                    '            "parameters": {\n'
-                    '                "type": "object",\n'
-                    '                "properties": {\n'
-                    '                    "image": '
-                    '{"type": "string"},\n'
-                    '                    "command": '
-                    '{"type": "string"}\n'
-                    "                },\n"
-                    '                "required": '
-                    '["image", "command"]\n'
-                    "            }\n"
-                    "        }\n"
-                    "    },\n"
-                )
-                tools = tools.replace(
-                    "TOOL_SCHEMAS: list[dict[str, Any]] = [\n",
-                    "TOOL_SCHEMAS: list[dict[str, Any]] = [\n" + docker_schema,
-                )
-                docker_impl = (
-                    "\n        if name == "
-                    '"docker_run":\n'
-                    "            result = "
-                    "subprocess.run(\n"
-                    '                ["docker", "run"'
-                    ', "--rm",\n'
-                    '                 args["image"]'
-                    ', "sh", "-c",\n'
-                    '                 args["command"'
-                    "]],\n"
-                    "                capture_output"
-                    "=True, text=True,\n"
-                    "                timeout=60,\n"
-                    "            )\n"
-                    "            return result.stdout"
-                    ' or "(no output)"\n'
-                )
-                tools = tools.replace(
-                    '        return f"Error: unknown tool: {name}"',
-                    docker_impl + '\n        return f"Error: unknown tool: {name}"',
-                )
-                ops.append(
-                    {
-                        "op": "modify",
-                        "path": "src/agent/tools.py",
-                        "content": tools,
-                    }
-                )
-
-        elif strategy == 2:
-            # Modify cli.py: add --temperature
-            cli = file_blocks.get("src/agent/cli.py", "")
-            if cli:
-                cli = cli.replace(
-                    '    max_iterations: int = typer.Option(30, "--max-iterations"),',
-                    "    max_iterations: int = "
-                    'typer.Option(30, "--max-'
-                    'iterations"),\n'
-                    "    temperature: float = "
-                    "typer.Option(0.7, "
-                    '"--temperature"),',
-                )
-                cli = cli.replace(
-                    "            max_iterations=max_iterations,",
-                    "            max_iterations="
-                    "max_iterations,\n"
-                    "            temperature="
-                    "temperature,",
-                )
-                ops.append(
-                    {
-                        "op": "modify",
-                        "path": "src/agent/cli.py",
-                        "content": cli,
-                    }
-                )
-
-        else:
-            # Modify agent.py: add retry logic
-            agent = file_blocks.get("src/agent/agent.py", "")
-            if agent:
-                agent = agent.replace(
-                    '        if choice.finish_reason != "tool_calls":\n            break',
-                    "        if choice.finish_reason"
-                    ' != "tool_calls":\n'
-                    "            if not output.strip("
-                    "):\n"
-                    "                # Retry once if"
-                    " empty\n"
-                    "                messages.append("
-                    '{"role": "user",\n'
-                    '                    "content": '
-                    '"Please try again."})\n'
-                    "                continue\n"
-                    "            break",
-                )
-                ops.append(
-                    {
-                        "op": "modify",
-                        "path": "src/agent/agent.py",
-                        "content": agent,
-                    }
-                )
-
-        if not ops:
-            # Fallback: trivial modify
+        if strategy == 0 and prompts:
+            prompts += '\n\nEXTRA_RULES = "Always verify your changes by running tests."\n'
+            ops.append(
+                {
+                    "op": "modify",
+                    "path": "src/agent/prompts.py",
+                    "content": prompts,
+                }
+            )
+        elif strategy == 1 and agent:
+            agent = agent.replace(
+                "max_tokens=8192",
+                "max_tokens=16384",
+            )
             ops.append(
                 {
                     "op": "modify",
                     "path": "src/agent/agent.py",
-                    "content": "# mutated\n",
+                    "content": agent,
+                }
+            )
+        elif strategy == 2 and prompts:
+            prompts = prompts.replace(
+                "str_replace for precise edits",
+                "str_replace for precise edits. Read test files to understand expected behavior",
+            )
+            ops.append(
+                {
+                    "op": "modify",
+                    "path": "src/agent/prompts.py",
+                    "content": prompts,
+                }
+            )
+        elif strategy == 3 and agent:
+            agent = agent.replace(
+                '5: "locate"',
+                '3: "locate"',
+            )
+            agent = agent.replace(
+                '15: "edit"',
+                '8: "edit"',
+            )
+            ops.append(
+                {
+                    "op": "modify",
+                    "path": "src/agent/agent.py",
+                    "content": agent,
+                }
+            )
+
+        if not ops:
+            ops.append(
+                {
+                    "op": "modify",
+                    "path": "src/agent/prompts.py",
+                    "content": prompts or "MUTATED = True\n",
                 }
             )
 

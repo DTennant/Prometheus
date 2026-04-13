@@ -147,24 +147,26 @@ class TestSeedPackage:
         pkg = create_seed_package()
         assert pkg.package_id == "seed"
         assert pkg.generation == 0
-        assert len(pkg.files) == 9
+        assert len(pkg.files) == 10
 
     def test_seed_files_contain_required_content(
         self,
     ) -> None:
         pkg = create_seed_package()
-        assert "entry" in pkg.files["pyproject.toml"] or (
-            "[project.scripts]" in pkg.files["pyproject.toml"]
-        )
+        assert "[project.scripts]" in pkg.files["pyproject.toml"]
         assert "FROM" in pkg.files["Dockerfile"]
+        assert "agent_lib" in pkg.files["Dockerfile"]
         assert "run_agent" in pkg.files["src/agent/agent.py"]
-        assert "src/agent/planner.py" in pkg.files
         assert "src/agent/context.py" in pkg.files
-        assert "create_plan" in pkg.files["src/agent/planner.py"]
-        assert "should_summarize" in pkg.files["src/agent/context.py"]
-        assert "edit_file" in pkg.files["src/agent/tools.py"]
+        assert "src/agent/prompts.py" in pkg.files
+        assert "src/agent/diff.py" in pkg.files
+        assert "ContextManager" in pkg.files["src/agent/context.py"]
+        assert "SYSTEM_PROMPT" in pkg.files["src/agent/prompts.py"]
+        assert "str_replace" in pkg.files["src/agent/tools.py"]
         assert "search_files" in pkg.files["src/agent/tools.py"]
         assert "run_tests" in pkg.files["src/agent/tools.py"]
+        assert "git_diff" in pkg.files["src/agent/tools.py"]
+        assert "find_definition" in pkg.files["src/agent/tools.py"]
 
 
 # ── TestDryRunCodeMutator ────────────────────────────────────

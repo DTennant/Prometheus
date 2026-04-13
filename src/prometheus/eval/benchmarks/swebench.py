@@ -12,6 +12,29 @@ from prometheus.eval.task import Task, TaskInstance, TaskResult
 
 log = logging.getLogger(__name__)
 
+EASY_SUBSET_20: list[str] = [
+    "django__django-13297",
+    "django__django-13363",
+    "django__django-13406",
+    "django__django-13410",
+    "django__django-13512",
+    "django__django-15572",
+    "django__django-15851",
+    "django__django-15930",
+    "astropy__astropy-13033",
+    "astropy__astropy-14096",
+    "astropy__astropy-14182",
+    "astropy__astropy-14309",
+    "sympy__sympy-19637",
+    "sympy__sympy-20154",
+    "sympy__sympy-21612",
+    "sympy__sympy-22714",
+    "scikit-learn__scikit-learn-10297",
+    "scikit-learn__scikit-learn-14309",
+    "psf__requests-3362",
+    "matplotlib__matplotlib-23562",
+]
+
 
 def _docker_image_tag(instance_id: str) -> str:
     """Convert instance_id to SWE-bench Docker image tag.
@@ -36,9 +59,11 @@ class SWEBenchAdapter(BenchmarkAdapter):
         self,
         split: str = "test",
         dataset_name: str = "princeton-nlp/SWE-bench_Verified",
+        instance_ids: list[str] | None = None,
     ) -> None:
         self._split = split
         self._dataset_name = dataset_name
+        self._instance_ids = instance_ids
 
     def is_available(self) -> bool:
         try:
@@ -53,8 +78,12 @@ class SWEBenchAdapter(BenchmarkAdapter):
         from datasets import load_dataset
 
         ds = load_dataset(self._dataset_name, split=self._split)
-        tasks: list[Task] = []
 
+        if self._instance_ids is not None:
+            id_set = set(self._instance_ids)
+            ds = ds.filter(lambda x: x["instance_id"] in id_set)
+
+        tasks: list[Task] = []
         for item in ds:
             tasks.append(_SWEBenchTask(dict(item)))
             if limit and len(tasks) >= limit:
