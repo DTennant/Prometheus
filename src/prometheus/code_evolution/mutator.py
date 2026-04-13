@@ -33,11 +33,19 @@ def _render_eval_results(report: EvalReport) -> str:
         f"Tasks passed: {len(passed)}/{len(report.results)}",
         f"Total tokens: {report.total_tokens}",
     ]
+    if passed:
+        lines.append("\nPassed tasks:")
+        for r in passed[:5]:
+            lines.append(f"  - {r.instance_id} (tokens: {r.tokens_used})")
     if failed:
-        lines.append("\nFailed tasks:")
+        lines.append("\nFailed tasks (ANALYZE THESE):")
         for r in failed[:10]:
             err = r.error or "incorrect output"
-            lines.append(f"  - {r.instance_id}: {err}")
+            lines.append(f"\n  ### {r.instance_id}")
+            lines.append(f"  Error: {err[:500]}")
+            if r.raw_output:
+                snippet = r.raw_output[:300].replace("\n", "\n    ")
+                lines.append(f"  Agent output: {snippet}")
     return "\n".join(lines)
 
 
@@ -47,9 +55,15 @@ def _build_code_mutation_prompt(
     history: CodeEvolutionHistory,
 ) -> str:
     return f"""\
-You are an AI agent code optimizer. Your job is to modify \
-the agent source code to improve its performance on coding \
-tasks.
+You are evolving an AI coding agent. This agent will be \
+run by YOU — the same model that is reading this prompt. \
+Your goal is to modify the source code so that when YOU \
+execute this agent, YOU perform better on the eval tasks.
+
+Think about what went wrong: look at the failed tasks \
+below, see the errors and your previous output, and \
+figure out what YOU would need — better prompts, better \
+tools, better error handling — to get those tasks right.
 
 ## Current Source Files
 
@@ -63,34 +77,41 @@ tasks.
 
 {history.summary_for_mutation()}
 
-## Your Task
+## Analysis Instructions
 
-Return a JSON array of file operations to apply. Each \
-operation is an object with these fields:
+Before generating changes, analyze the failures:
 
-- "op": one of "modify", "create", or "delete"
+1. For each failed task, identify the ROOT CAUSE. \
+Was it a wrong tool call? Bad output format? Missing \
+capability? Timeout?
+2. Look at the agent output for failed tasks — what \
+did the agent actually produce vs what was expected?
+3. Consider: would a prompt change fix this, or does \
+the agent need a new tool or different logic?
+4. Prioritize fixes that address the MOST failures.
+
+## Output Format
+
+Return a JSON array of file operations:
+
+- "op": "modify", "create", or "delete"
 - "path": relative file path (e.g. "src/agent/agent.py")
-- "content": full file content (required for modify/create, \
-absent for delete)
+- "content": full file content (for modify/create)
 
-Example:
 ```json
 [
   {{"op": "modify", "path": "src/agent/agent.py", \
-"content": "...full new content..."}},
-  {{"op": "create", "path": "src/agent/utils.py", \
-"content": "..."}},
-  {{"op": "delete", "path": "src/agent/old.py"}}
+"content": "...full new content..."}}
 ]
 ```
 
 Rules:
 - Include full file content — no partial diffs.
-- Only modify files that need changes. Don't echo \
-unchanged files.
-- The agent must still satisfy the CLI contract: \
+- Only modify files that need changes.
+- The agent must satisfy: \
 `python -m agent run --prompt ... --workspace ...`
 - Keep pyproject.toml and Dockerfile valid.
+- Write valid Python only — the code will be executed.
 
 Output ONLY the JSON array. No explanation."""
 

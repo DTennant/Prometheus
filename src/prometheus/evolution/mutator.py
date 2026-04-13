@@ -24,12 +24,33 @@ def _build_mutation_prompt(
     report: EvalReport,
     history: EvolutionHistory,
 ) -> str:
+    passed_cases = [r for r in report.results if r.passed]
     failed_cases = [r for r in report.results if not r.passed]
+
+    passed_summary = ""
+    for r in passed_cases[:5]:
+        passed_summary += f"\n- {r.instance_id} (tokens: {r.tokens_used})"
+
     failed_summary = ""
     for r in failed_cases[:10]:
-        failed_summary += f"\n- Task {r.instance_id}: error={r.error or 'incorrect output'}, tokens={r.tokens_used}"
+        err = r.error or "incorrect output"
+        failed_summary += f"\n\n### {r.instance_id}"
+        failed_summary += f"\nError: {err[:500]}"
+        if r.raw_output:
+            snippet = r.raw_output[:300].replace("\n", "\n  ")
+            failed_summary += f"\nAgent output: {snippet}"
 
-    return f"""You are an AI harness optimizer. Your job is to modify an agent harness configuration to improve its performance on coding tasks.
+    return f"""You are evolving an agent harness config. \
+This config controls an agent run by YOU — the same \
+model reading this. Optimize for how YOU work: what \
+prompts help YOU think clearly, what workflow phases \
+help YOU avoid mistakes, what tool descriptions help \
+YOU use tools correctly.
+
+Analyze the failures below. For each, identify the \
+root cause — was it a prompt issue, a workflow issue, \
+a tool description issue, or a parameter issue? Then \
+make targeted changes.
 
 ## Current Harness Config
 ```json
@@ -39,9 +60,10 @@ def _build_mutation_prompt(
 ## Evaluation Results
 - Accuracy: {report.accuracy:.1%}
 - Total tokens used: {report.total_tokens}
-- Tasks passed: {sum(1 for r in report.results if r.passed)}/{len(report.results)}
+- Passed: {len(passed_cases)}/{len(report.results)}
+{passed_summary}
 
-## Failed Tasks{failed_summary}
+## Failed Tasks (ANALYZE THESE){failed_summary}
 
 ## Evolution History
 {history.summary_for_mutation()}
